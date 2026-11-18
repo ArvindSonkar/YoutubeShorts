@@ -1,0 +1,15 @@
+{
+  "analysis_fps": 3.0,
+  "analysis_width": 320,
+  "audio_stream": 0,
+  "count": 15,
+  "min_duration": 20.0,
+  "max_duration": 55.0,
+  "min_score": 0.30,
+  "min_gap": 5.0,
+  "crop_confidence": 0.60,
+  "crop_min_width": 0.55,
+  "preset": "medium",
+  "crf": 18,
+  "threads": 4
+}

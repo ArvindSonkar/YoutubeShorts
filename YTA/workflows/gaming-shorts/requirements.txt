@@ -1,0 +1,5 @@
+# Versions verified in the existing Windows/Python 3.10 environment.
+# FFmpeg/FFprobe are separate portable binaries under tools/ffmpeg.
+opencv-python-headless==4.13.0.92
+numpy==2.1.1
+Pillow==10.4.0

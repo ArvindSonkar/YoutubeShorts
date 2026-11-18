@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "preferred_style": "dynamic_crop",
+  "tools_directory": "tools/ffmpeg",
+  "source": "",
+  "output": "",
+  "expected_source_sha256": null,
+  "clip": {"start": "00:00.000", "end": "00:20.000"},
+  "video": {"width": 1080, "height": 1920, "crf": 18, "preset": "medium", "threads": 4},
+  "audio": {"stream": 0, "bitrate": "192k"},
+  "framing": {
+    "enabled": true,
+    "min_width": 0.25,
+    "max_width": 1.0,
+    "max_upscale": 2.6,
+    "subject_padding": 0.02,
+    "keyframes": []
+  },
+  "smoothing": {
+    "enabled": true,
+    "interpolation": "smoothstep",
+    "max_pan_per_second": 0.8,
+    "max_width_change_per_second": 0.8
+  },
+  "impacts": {
+    "enabled": true,
+    "times": [],
+    "strength": 0.028,
+    "sigma_seconds": 0.16,
+    "max_strength": 0.04
+  },
+  "background": {"enabled": true, "blur_sigma": 9, "brightness": 0.48, "color": [12, 16, 24]},
+  "hook": {
+    "enabled": false,
+    "animated": true,
+    "kicker": "",
+    "lines": [],
+    "duration": 2.5,
+    "fade_in": 0.24,
+    "fade_out": 0.28,
+    "initial_opacity": 0.45,
+    "slide_pixels": 24,
+    "position": [0.08, 0.094],
+    "size": [0.80, 0.172],
+    "safe_area": [0.06, 0.08, 0.92, 0.80],
+    "font": "C:/Windows/Fonts/arialbd.ttf",
+    "font_size": 100,
+    "accent": [193, 158, 255],
+    "text_color": [247, 247, 252],
+    "panel_opacity": 190
+  }
+}
