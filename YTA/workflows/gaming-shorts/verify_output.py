@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from dynamic_crop import compose, probe
+from progress import stage, decode_check
 
 
 def audio_samples(job, path, start, duration, ordinal=0):
@@ -16,6 +17,11 @@ def audio_samples(job, path, start, duration, ordinal=0):
 
 
 def verify(job, full_decode=True):
+    with stage('Output verification: metadata, frames and audio', 6, 'checks', 'Verification') as meter:
+        return _verify(job, full_decode, meter)
+
+
+def _verify(job, full_decode, meter):
     meta = probe(job.target, job.executables)
     video = next(s for s in meta['streams'] if s['codec_type'] == 'video')
     sound = next(s for s in meta['streams'] if s['codec_type'] == 'audio')
@@ -28,9 +34,8 @@ def verify(job, full_decode=True):
     if abs(float(meta['format']['duration'])-job.duration) > max(.06, 1/float(job.fps)):
         raise RuntimeError('Output duration does not match the job')
     if full_decode:
-        subprocess.run([job.executables['ffmpeg'], '-v', 'error', '-xerror', '-nostdin',
-                        '-i', str(job.target), '-f', 'null', '-'], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        decode_check(job.executables['ffmpeg'], job.target, job.duration)
+    meter.update(1)
     source = cv2.VideoCapture(str(job.source))
     output = cv2.VideoCapture(str(job.target))
     errors = []
@@ -46,6 +51,7 @@ def verify(job, full_decode=True):
             if error > 15:
                 raise RuntimeError(f'Output/source composition mismatch at frame {index}: {error:.2f}')
             errors.append({'frame': index, 'mean_absolute_error': error})
+            meter.update(1+len(errors))
     finally:
         source.release(); output.release()
     audio_checks = []
@@ -70,6 +76,7 @@ def verify(job, full_decode=True):
         audio_checks.append({'offset': offset, 'correlation': correlation,
                              'source_rms': rms, 'output_rms': encoded_rms,
                              'note': 'Silent/constant windows have no meaningful correlation' if correlation is None else 'Aligned'})
+        meter.update(4+len(audio_checks))
     return {'frames': job.count, 'dimensions': [job.ow, job.oh], 'duration': job.duration,
             'fps': str(job.fps), 'frame_checks': errors, 'audio_checks': audio_checks,
             'full_decode_passed': True, 'note': 'Technical checks do not measure entertainment value.'}

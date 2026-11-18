@@ -1,5 +1,6 @@
 """Explainable action ranking, boundary selection, and non-overlapping diversity."""
 import numpy as np
+from progress import stage
 
 
 def local_scale(values, fps, floor):
@@ -33,6 +34,13 @@ def action_scores(data, fps):
     # Loud music over a still screen must not become a visual action highlight.
     active = (data['motion'] > .012) | (data['camera'] > .10)
     scores *= np.where(active, 1., .20)
+    # Sustained residual movement is stronger evidence than camera sweeps alone.
+    width = max(1, round(2*fps))
+    sustained = np.convolve(np.pad((data['motion'] > .012).astype(float),
+                                   (width//2, width-1-width//2), mode='edge'),
+                            np.ones(width)/width, mode='valid')
+    scores *= .55+.45*sustained
+    scores *= 1-np.clip(data.get('screen_penalty', np.zeros_like(scores)), 0, 1)
     scores = np.clip(scores, 0, 1)
     radius = max(1, round(fps))
     padded = np.pad(scores, (radius, radius), mode='edge')
@@ -40,6 +48,11 @@ def action_scores(data, fps):
 
 
 def candidate_windows(data, duration, settings):
+    with stage('Highlight scoring and candidate selection', len(data['time']), 'samples', 'Selection') as meter:
+        return _candidate_windows(data, duration, settings, meter)
+
+
+def _candidate_windows(data, duration, settings, meter):
     fps = settings['analysis_fps']
     scores = action_scores(data, fps)
     minimum, maximum = settings['min_duration'], settings['max_duration']
@@ -52,7 +65,10 @@ def candidate_windows(data, duration, settings):
              if scores[i] >= settings['min_score'] and
              i == max(0, i-radius) + int(np.argmax(scores[max(0, i-radius):i+radius+1]))]
     candidates = []
+    cuts = times[data['cut'] > .5]
+    screen_penalties = data.get('screen_penalty', np.zeros(len(times)))
     for peak in peaks:
+        meter.update(peak)
         t = float(times[peak])
         # Extend through sustained action, while limiting quiet lead-in/outro.
         left = right = peak
@@ -61,8 +77,8 @@ def candidate_windows(data, duration, settings):
             left -= 1
         while right+1 < len(scores) and times[right]-t < maximum*.6 and scores[right+1] >= low:
             right += 1
-        start = max(0., float(times[left])-3.)
-        end = min(duration, float(times[right])+4.)
+        start = max(0., float(times[left])-settings.get('setup_seconds', 1.))
+        end = min(duration, float(times[right])+settings.get('payoff_seconds', 1.5))
         if end-start < minimum:
             missing = minimum-(end-start)
             start = max(0., start-missing*.4)
@@ -73,30 +89,58 @@ def candidate_windows(data, duration, settings):
             end = min(duration, start+maximum)
             start = max(0., end-maximum)
         # Prefer a nearby actual cut when it preserves both length and the peak.
-        cuts = times[data['cut'] > .5]
         start_cuts = cuts[(cuts >= start) & (cuts <= min(start+3, t-1)) & (end-cuts >= minimum)]
         if len(start_cuts):
             start = float(start_cuts[0])
         end_cuts = cuts[(cuts <= end) & (cuts >= max(end-3, t+1)) & (cuts-start >= minimum)]
         if len(end_cuts):
             end = float(end_cuts[-1])
+        # Search nearby openings while retaining the peak and configured bounds.
+        options = times[(times >= start) & (times <= min(start+4., t-.5, end-minimum))]
+        if len(options):
+            def opening_value(s):
+                a0, b0 = np.searchsorted(times, [s, min(end, s+settings.get('opening_seconds', 2.))])
+                return float(scores[a0:max(a0+1,b0)].mean())-.015*(s-start)
+            start = float(max(options, key=opening_value))
         a, b = np.searchsorted(times, [start, end])
         b = max(a+1, min(len(scores), b))
         segment = scores[a:b]
         active_fraction = float(np.mean((data['motion'][a:b] > .012) | (data['camera'][a:b] > .1)))
         darkness = float(np.mean(data['brightness'][a:b] < .025))
         cut_fraction = float(np.mean(data['cut'][a:b]))
+        opening_end = min(b, a+max(1, round(settings.get('opening_seconds', 2.)*fps)))
+        opening = float(scores[a:opening_end].mean())
+        ending = float(scores[max(a,b-round(2*fps)):b].mean())
+        screen_fraction = float(np.mean(screen_penalties[a:b]))
+        local_active = data['motion'][a:b] > .012
+        sustained_fraction = float(np.mean(local_active))
         quality = .55*float(segment.mean()) + .25*float(np.percentile(segment, 85)) + .20*active_fraction
-        quality -= .30*darkness + .25*cut_fraction
+        quality = .8*quality+.2*opening
+        quality -= .30*darkness + .25*cut_fraction + .5*screen_fraction
+        quality -= .12*(1-sustained_fraction)
         if quality < settings['min_score'] or active_fraction < .25 or darkness > .35:
             continue
         marks = np.linspace(a, b-1, 5).astype(int)
+        warnings = []
+        if opening < max(.20, float(scores[peak])*.45):
+            warnings.append('Weak opening: little activity in the first two seconds')
+        if ending > .75*float(scores[peak]):
+            warnings.append('Action continues at the ending; payoff is unverified')
+        if cut_fraction > .08:
+            warnings.append('Frequent scene changes; may be a cutscene or montage')
+        confidence = float(np.clip(.5*active_fraction+.3*sustained_fraction+.2*(1-darkness)-.3*cut_fraction-.5*screen_fraction, 0, 1))
         candidates.append({'start': round(start, 6), 'end': round(end, 6), 'peak': t,
                            'score': round(float(quality), 5),
+                           'confidence': round(confidence, 4), 'warnings': warnings,
+                           'confidence_note': 'Heuristic evidence strength, not a calibrated event probability',
                            'fingerprints': data['fingerprint'][marks].tolist(),
                            'reasons': {'mean_action': round(float(segment.mean()), 4),
                                        'peak_action': round(float(scores[peak]), 4),
                                        'active_fraction': round(active_fraction, 4),
+                                       'opening_score': round(opening, 4),
+                                       'ending_activity': round(ending, 4),
+                                       'sustained_local_motion': round(sustained_fraction, 4),
+                                       'screen_penalty': round(screen_fraction, 4),
                                        'dark_fraction': round(darkness, 4),
                                        'cut_fraction': round(cut_fraction, 4)}})
     # Multiple peaks can refine to the exact same interval.

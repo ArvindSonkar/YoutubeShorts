@@ -7,8 +7,10 @@ import tempfile
 
 import cv2
 import numpy as np
+from progress import stage
+from game_profiles import screen_penalty
 
-VERSION = 1
+VERSION = 2
 
 
 def read_exact(pipe, size):
@@ -93,20 +95,26 @@ def visual_features(previous, gray):
         x, y, w, h, area = stats[i]
         dominance = area / max(1, int(mask.sum()))
         confidence = min(1., dominance * 1.4) * min(1., area / (width * height * .025))
+        # Protect other substantial motion regions too; these are not identified characters.
+        significant = [j for priority, j in choices if priority >= max(choices)[0]*.45]
+        left = min(stats[j][0] for j in significant)
+        top = min(stats[j][1] for j in significant)
+        right = max(stats[j][0]+stats[j][2] for j in significant)
+        bottom = max(stats[j][1]+stats[j][3] for j in significant)
         base.update(center=(centers[i] / [width, height]).tolist(),
-                    box=[x / width, y / height, (x+w) / width, (y+h) / height],
+                    box=[left / width, top / height, right / width, bottom / height],
                     confidence=float(confidence))
     return base
 
 
-def scan_video(source, executable, duration, fps, width, source_size):
+def scan_video(source, executable, duration, fps, width, source_size, profile='generic'):
     height = max(2, round(width * source_size[1] / source_size[0] / 2) * 2)
     command = [executable, '-v', 'error', '-nostdin', '-threads', '2', '-i', str(source),
                '-t', str(duration), '-map', '0:v:0', '-an', '-filter_threads', '1',
                '-vf', f'fps={fps},scale={width}:{height}:flags=area',
                '-pix_fmt', 'gray', '-f', 'rawvideo', 'pipe:1']
     rows, previous = [], None
-    with decoded_pipe(command) as pipe:
+    with stage('Video analysis', duration, 'seconds', 'Video analysis') as meter, decoded_pipe(command) as pipe:
         index = 0
         while True:
             raw = read_exact(pipe, width * height)
@@ -116,12 +124,12 @@ def scan_video(source, executable, duration, fps, width, source_size):
                 raise RuntimeError('Truncated analysis frame')
             gray = np.frombuffer(raw, np.uint8).reshape(height, width)
             row = visual_features(previous, gray)
+            row['screen_penalty'] = screen_penalty(gray, profile)
             row['time'] = index / fps
             rows.append(row)
             previous = gray
             index += 1
-            if index % max(1, round(fps * 60)) == 0:
-                print(f'Analyzed video {index / fps:.0f}/{duration:.0f}s', flush=True)
+            meter.update(index/fps)
     if len(rows) < 2 or len(rows) / fps < duration - max(1., 2 / fps):
         raise RuntimeError('Video analysis ended early or produced too few samples')
     return {key: np.asarray([row[key] for row in rows]) for key in rows[0]}
@@ -134,7 +142,7 @@ def scan_audio(source, executable, duration, fps, stream=0):
                '-t', str(duration), '-map', f'0:a:{stream}', '-vn', '-ac', '1', '-ar', str(rate),
                '-f', 'f32le', 'pipe:1']
     rows, previous = [], None
-    with decoded_pipe(command) as pipe:
+    with stage('Audio analysis', duration, 'seconds', 'Audio analysis') as meter, decoded_pipe(command) as pipe:
         while True:
             raw = read_exact(pipe, block * 4)
             if not raw:
@@ -148,6 +156,7 @@ def scan_audio(source, executable, duration, fps, stream=0):
             flux = float(np.maximum(spectrum - previous, 0).sum()) if previous is not None else 0.
             rows.append([20 * np.log10(max(rms, 1e-6)), flux, float(np.max(np.abs(samples)))])
             previous = spectrum
+            meter.update(len(rows)*block/rate)
     if not rows:
         raise RuntimeError('No audio samples decoded')
     return np.asarray(rows), block / rate
@@ -157,7 +166,7 @@ def scan(source_context, duration, settings):
     video = next(s for s in source_context.meta['streams'] if s['codec_type'] == 'video')
     fps = settings['analysis_fps']
     data = scan_video(source_context.source, source_context.executables['ffmpeg'], duration, fps,
-                      settings['analysis_width'], (video['width'], video['height']))
+                      settings['analysis_width'], (video['width'], video['height']), settings.get('game_profile', 'generic'))
     print('Analyzing audio...', flush=True)
     sound, step = scan_audio(source_context.source, source_context.executables['ffmpeg'], duration,
                               fps, settings['audio_stream'])

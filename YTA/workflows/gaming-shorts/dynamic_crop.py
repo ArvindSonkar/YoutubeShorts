@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
 import copy
 from fractions import Fraction
 import hashlib
@@ -15,6 +16,7 @@ import sys
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from progress import stage, checked_output, decode_check
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -65,11 +67,12 @@ def write_new_json(path, data):
         handle.write('\n')
 
 
-def digest(path):
+def digest(path, label='Checksum'):
     h = hashlib.sha256()
-    with Path(path).open('rb') as handle:
+    with stage(label, Path(path).stat().st_size, 'bytes', 'Checksums') as meter, Path(path).open('rb') as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b''):
             h.update(block)
+            meter.update(handle.tell())
     return h.hexdigest()
 
 
@@ -198,8 +201,9 @@ class SourceContext:
         self.source = project_path(source)
         self.executables = executables
         self.signature = self.stat_signature()
-        self.meta = probe(self.source, executables)
-        self.sha256 = digest(self.source)
+        with stage('Source probing', category='Source preparation'):
+            self.meta = probe(self.source, executables)
+        self.sha256 = digest(self.source, 'Source checksum')
         self.assert_unchanged()
 
     def stat_signature(self):
@@ -207,7 +211,7 @@ class SourceContext:
         return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
     def assert_unchanged(self, full=False):
-        if self.stat_signature() != self.signature or (full and digest(self.source) != self.sha256):
+        if self.stat_signature() != self.signature or (full and digest(self.source, 'Final source integrity checksum') != self.sha256):
             raise RuntimeError('Source changed during processing; start a new run')
 
 
@@ -215,7 +219,7 @@ class Job:
     def __init__(self, config, source_context=None):
         validate(config)
         self.config = config
-        self.executables = tools(config)
+        self.executables = source_context.executables if source_context else tools(config)
         self.source = project_path(config['source'])
         self.target = generated_path(config['output'])
         if self.source.suffix.lower() != '.mp4' or not self.source.is_file():
@@ -275,9 +279,9 @@ class Job:
 
     def check_timestamps(self):
         # Read only the selected interval (plus the preceding keyframe), then check its PTS grid.
-        response = subprocess.check_output([self.executables['ffprobe'], '-v', 'error',
+        response = checked_output([self.executables['ffprobe'], '-v', 'error',
             '-select_streams','v:0','-read_intervals',f'{max(0,self.start-1):.9f}%{self.end+.1:.9f}',
-            '-show_frames','-show_entries','frame=best_effort_timestamp_time','-of','json',str(self.source)],encoding='utf-8')
+            '-show_frames','-show_entries','frame=best_effort_timestamp_time','-of','json',str(self.source)], 'Source frame timestamps')
         pts = [float(f['best_effort_timestamp_time']) for f in json.loads(response)['frames'] if 'best_effort_timestamp_time' in f]
         selected = sorted(t for t in pts if self.start-.00001 <= t < self.end-.00001)
         if len(selected) != self.count or any(abs(t-(self.first+i)/float(self.fps)) > .0001 for i,t in enumerate(selected)):
@@ -288,7 +292,7 @@ def ease(value):
     return value*value*(3-2*value)
 
 
-def target_at(config, time):
+def target_at(config, time, key_times=None):
     keys = config['framing']['keyframes']
     if not config['framing']['enabled'] or not keys:
         return np.array([.5,.5,1.0]), None
@@ -296,9 +300,8 @@ def target_at(config, time):
     if time >= keys[-1]['time']:
         a=b=keys[-1]
     elif time > keys[0]['time']:
-        for a,b in zip(keys, keys[1:]):
-            if a['time'] <= time <= b['time']:
-                break
+        position = bisect_right(key_times if key_times is not None else [k['time'] for k in keys], time)
+        a, b = keys[position-1], keys[position]
     u = 0 if a['time']==b['time'] else (time-a['time'])/(b['time']-a['time'])
     if config['smoothing']['enabled'] and config['smoothing']['interpolation']=='smoothstep':
         u=ease(u)
@@ -314,9 +317,10 @@ def camera_plan(config, sw, sh, ow, oh, fps, count):
     f,s,imp=config['framing'],config['smoothing'],config['impacts']
     previous=None
     result=[]
+    key_times = [key['time'] for key in f['keyframes']]
     for index in range(count):
         t=index/fps
-        desired,box=target_at(config,t)
+        desired,box=target_at(config,t,key_times)
         if f['enabled'] and imp['enabled']:
             punch=min(imp['max_strength'],sum(imp['strength']*math.exp(-((t-p)/imp['sigma_seconds'])**2) for p in imp['times']))
             desired[2]/=1+punch
@@ -465,7 +469,7 @@ def preview(job, directory, raw=False, step=1):
     print(f'{len(indices)} frames saved to {directory}')
 
 
-def render(job):
+def render(job, label='Rendering Short'):
     if job.target.exists():
         raise FileExistsError(f'Refusing to overwrite existing video: {job.target}')
     if job.config['framing']['enabled'] and not job.config['framing']['keyframes']:
@@ -490,7 +494,7 @@ def render(job):
     write_new_json(directory/'command.json',command)
     cap=cv2.VideoCapture(str(job.source))
     cap.set(cv2.CAP_PROP_POS_FRAMES,job.first)
-    with (directory/'render.log').open('x',encoding='utf-8') as log:
+    with stage(label, job.count, 'frames', 'Rendering') as meter, (directory/'render.log').open('x',encoding='utf-8') as log:
         process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,cwd=ROOT)
         try:
             for index in range(job.count):
@@ -498,11 +502,20 @@ def render(job):
                 if not ok or round(cap.get(cv2.CAP_PROP_POS_FRAMES))-1 != job.first+index:
                     raise ValueError('Decoder frame position changed unexpectedly')
                 process.stdin.write(compose(frame,job.plan[index],job.config,job.layer).tobytes())
-                if index%150==0:
-                    print(f'{index}/{job.count} frames',flush=True)
+                meter.update(index+1)
             process.stdin.close()
-            if process.wait()!=0:
+            # All input frames have been submitted, but buffered encoding is not done.
+            # Its remaining duration is unknown; do not display a fabricated zero ETA.
+            meter.name, meter.total = label+' (finalizing encoder)', None
+            meter.update(force=True)
+            while process.poll() is None:
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    meter.update()
+            if process.returncode!=0:
                 raise RuntimeError(f'FFmpeg failed; inspect {directory / "render.log"}')
+            meter.name, meter.total = label, job.count
         except BaseException:
             process.kill(); process.wait()
             raise
@@ -517,7 +530,7 @@ def render(job):
         raise RuntimeError('Output audio verification failed; partial retained')
     if abs(float(result['format']['duration'])-job.duration)>max(.06,1/float(job.fps)):
         raise RuntimeError('Output duration verification failed; partial retained')
-    subprocess.run([job.executables['ffmpeg'],'-v','error','-xerror','-i',str(pending),'-f','null','-'],check=True)
+    decode_check(job.executables['ffmpeg'], pending, job.duration)
     if job.source_context:
         job.source_context.assert_unchanged()
     elif digest(job.source)!=job.source_hash:

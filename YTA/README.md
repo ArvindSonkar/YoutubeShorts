@@ -9,7 +9,7 @@ model downloads, uploads, or network requests are used by either processing comm
 Run in PowerShell from this repository:
 
 ```powershell
-cd "C:\Users\arso0922\Desktop\YTA"
+cd "C:\Users\arso0922\Desktop\Avi_Git_Repo\YoutubeShorts\YTA"
 
 python -B workflows/gaming-shorts/auto_shorts.py `
   --input "D:\Recordings\gta5-session.mp4" `
@@ -37,10 +37,12 @@ Default behavior:
 1. Validate source compatibility and hash it once.
 2. Sequentially analyze 320-pixel-wide video at 3 samples/second and streamed mono audio.
 3. Score motion, camera movement, visual changes, sound energy and audio transients.
-4. Propose 20–55 second intervals with lead-in/outro, rank them, and suppress overlapping
+4. Propose 20–55 second intervals (configurable down to 2 seconds), score their openings,
+   sustained activity and boundaries, and suppress overlapping
    or visually similar selections. Apply a preference for different parts of the recording.
-5. Generate crop keyframes from persistent residual-motion regions. Preserve the full
-   image when confidence is low. Use the existing renderer's smoothing and enlargement limits.
+5. Generate crop keyframes from stable residual-motion regions, including other substantial
+   moving regions and configured HUD protection. Preserve the full image when confidence is low.
+   Generate safe, close and wide contact sheets before encoding any video.
 6. Render selected clips sequentially at 1080×1920, original frame rate, H.264/AAC.
 7. Verify decoding, duration, frame count, sampled source composition and audio alignment.
 8. Save MP4s, configurations, previews, QA results, a manifest and a local HTML report.
@@ -115,10 +117,14 @@ output/gta-session/
   scores.npz             Sample timestamps and action scores
   candidates.json        All candidates, selection and score components
   index.html             Local report with contact sheets and completed video links
+  metrics.json           Current invocation and historical stage timings, counts and cache hits
+  review-applied.json    Optional imported approval/rejection/trim decisions
   clips/
     short-01.mp4         Verified finished video
     short-01.json        Reusable single-clip editor configuration
     short-01.jpg         Planned start/middle/end contact sheet
+    short-01-close.jpg   Close alternative (falls back when tracking is uncertain)
+    short-01-wide.jpg    Full-image alternative
     short-01.qa.json      Sampled frame/audio verification results
     short-01.work/       Effective config, camera plan, FFmpeg command/log and metadata
   attempts/              Retained incomplete artifacts, if a retry was required
@@ -161,7 +167,9 @@ CLI values override the settings file. Frame boundaries are snapped to the origi
 
 This is an automatic **activity-based** editor. It does not reliably recognize gunfights,
 explosions, crashes, missions, named characters or vehicles. It has no trained detector,
-OCR, speech recognition, local language model, or semantic event classifier.
+OCR, speech recognition, local language model, or semantic event classifier. An optional
+`--game-profile dmc5` adds only a calibrated title-screen similarity filter for the supplied
+DMC5 Special Edition recording. It does not identify style ranks, health, victory or combat events.
 
 Cutscenes, credits, camera swings and music can produce false positives. A bounded test of
 the current GTA recording's opening selected active cutscene footage; this is not evidence
@@ -185,6 +193,117 @@ Analysis keeps sampled features in memory (proportional to duration × analysis 
 only a few decoded frames/audio blocks at once. It does not load the complete video into
 RAM. Decoding inter-frame codecs may still require processing source reference frames even
 when analysis samples are sparse. There is no published 1–3 hour benchmark yet.
+
+## Quality, progress and local review upgrade
+
+All original CLI flags remain supported. `--offline` remains explicit documentation of
+always-local execution. No package or model installation is performed. Start a new output
+directory after upgrading: old runs deliberately cannot resume with changed code/settings.
+Their videos and reports remain intact.
+
+For a bounded preview of the original recording (the opening includes title/cutscene footage):
+
+```powershell
+python -B workflows\gaming-shorts\auto_shorts.py `
+  --input "videos\DMC5.mp4" `
+  --output-dir "output\dmc5-quality-preview" `
+  --count 3 `
+  --min-duration 12 `
+  --max-duration 40 `
+  --max-seconds 120 `
+  --game-profile dmc5 `
+  --analysis-only `
+  --offline
+```
+
+For the complete recording, automatically select and render up to 15 clips:
+
+```powershell
+python -B workflows\gaming-shorts\auto_shorts.py `
+  --input "videos\DMC5.mp4" `
+  --output-dir "output\dmc5-quality-full" `
+  --count 15 `
+  --min-duration 12 `
+  --max-duration 40 `
+  --game-profile dmc5 `
+  --offline
+```
+
+To analyze the entire recording before rendering, add `--analysis-only` to that full command.
+To resume that plan or an interrupted full render, use the same settings and directory:
+
+```powershell
+python -B workflows\gaming-shorts\auto_shorts.py `
+  --input "videos\DMC5.mp4" `
+  --output-dir "output\dmc5-quality-full" `
+  --count 15 `
+  --min-duration 12 `
+  --max-duration 40 `
+  --game-profile dmc5 `
+  --resume `
+  --offline
+```
+
+Keep `--max-seconds 120` when resuming a bounded preview. Removing that bound changes the
+run signature and requires a new directory. Run commands from the YTA project directory;
+relative input/output paths are resolved against the project root. Backticks must be the
+last character on their lines. Existing directories are rejected without `--resume`.
+
+New options:
+
+| Option | Default | Behavior |
+|---|---|---|
+| `--game-profile generic\|dmc5` | `generic` | DMC5 mode rejects a calibrated title-screen appearance only. Other games use generic features. |
+| `--framing-mode safe\|close\|wide` | `safe` | Safe uses at least 70% source width when confident; close uses `crop_min_width`; wide preserves the whole image. All modes respect protection/upscale constraints. |
+| `--review-file path` | none | Imports local JSON decisions bound to this exact run. Existing completed videos cannot be edited or replaced. |
+
+Additional `--settings` JSON keys are `opening_seconds` (1–2, default 2), `setup_seconds`
+(0–5, default 1), `payoff_seconds` (0–5, default 1.5), and `hud_regions` (default `[]`).
+HUD rectangles use `[left, top, right, bottom]` normalized to 0–1. For example,
+`{"hud_regions": [[0.02, 0.02, 0.40, 0.15]]}` protects a top-left HUD region. Regions must
+be chosen for the recording; the pipeline does not identify HUD semantics. Broad protection
+can make close and wide previews identical. Full-width fallback is intentional when uncertain.
+
+Open the run's `index.html` for scores, reasons, boundary warnings, original-interval playback,
+and close/wide contact sheets. Optional review:
+
+1. Run with `--analysis-only`.
+2. Choose Automatic/Approve/Reject, framing, and source-time trim bounds in the HTML page.
+3. Click **Export review JSON** and save the downloaded file locally.
+4. Resume with the same command, omit `--analysis-only`, and add
+   `--review-file "C:\path\to\review.json"`.
+
+Browser drafts use local storage when supported; exported JSON is the durable, portable
+record. Python saves accepted decisions as `review-applied.json`. Trims must remain within
+the original candidate, last at least two seconds, and snap to the source frame grid.
+Previews refresh on resume. Missing decisions remain automatic; review is never required.
+This is an interval trim, not an internal jump-cut editor. The report is a local HTML file,
+not a cloud service. Browsers may vary in support for local video fragment playback/storage.
+
+Progress uses a monotonic clock, with throttled updates approximately every two seconds.
+Stages print their start time (IST), elapsed time, measured work/rate, percentage where known,
+and an ETA only after enough work/time has elapsed. Unknown operations show `Calculating...`.
+Encoding finalization is indeterminate because submitted frames can still be buffered.
+Completion/failure/interruption prints the actual stage duration. Render ETA excludes later QA.
+
+`metrics.json` stores each invocation separately: wall time, stage samples/totals, counts,
+average/fastest/slowest completed render, generated duration, cache hits and Python peak memory.
+The final HTML report embeds the same measurement snapshot. Cumulative wall time sums invocations,
+excluding time between them. Nested verification stages may overlap, so accumulated stage
+duration is not wall time. Python memory excludes FFmpeg/FFprobe child processes. Uncatchable
+process termination/power loss can leave the last saved timing checkpoint incomplete.
+
+Performance changes reuse the same three decoded preview frames across framing alternatives,
+reuse source metadata/tool paths across jobs, and use binary search for camera keyframe lookup.
+Only one clip's full frame plan and a few raw preview frames are needed at a time. Sampled
+features/candidate metadata still grow with recording duration; this is not constant-memory
+analysis. Source hashing remains once at startup and once at successful completion; per-job
+checks use file metadata. Resume safely reuses features/plans/previews and checksum-matched MP4s.
+
+On the inspected machine, Windows reports Intel Iris Xe graphics and portable FFmpeg lists QSV,
+NVENC and AMF encoders. Encoder availability is not hardware/driver/quality validation. CPU
+H.264 remains the default; no GPU mode has been enabled. No 91-minute render or 1–3-hour
+benchmark was performed. See [UPGRADE_VALIDATION.md](UPGRADE_VALIDATION.md) for measured tests.
 
 ## Existing single-clip editor
 
@@ -218,7 +337,7 @@ environment reproduction. Portable FFmpeg is separately retained under `tools/ff
 Run the deterministic tests:
 
 ```powershell
-python -B workflows/gaming-shorts/tests/test_pipeline.py
+python -B -m unittest discover -s workflows/gaming-shorts/tests -p "test_*.py"
 ```
 
 Tests cover static/loud false positives, dark footage, candidate boundaries, overlap and

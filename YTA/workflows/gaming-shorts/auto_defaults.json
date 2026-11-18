@@ -11,5 +11,11 @@
   "crop_min_width": 0.55,
   "preset": "medium",
   "crf": 18,
-  "threads": 4
+  "threads": 4,
+  "opening_seconds": 2.0,
+  "setup_seconds": 1.0,
+  "payoff_seconds": 1.5,
+  "framing_mode": "safe",
+  "hud_regions": [],
+  "game_profile": "generic"
 }
