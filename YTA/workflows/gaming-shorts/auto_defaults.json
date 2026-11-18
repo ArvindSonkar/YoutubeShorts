@@ -5,9 +5,9 @@
   "count": 15,
   "min_duration": 20.0,
   "max_duration": 55.0,
-  "min_score": 0.30,
+  "min_score": 0.3,
   "min_gap": 5.0,
-  "crop_confidence": 0.60,
+  "crop_confidence": 0.6,
   "crop_min_width": 0.55,
   "preset": "medium",
   "crf": 18,
@@ -17,5 +17,64 @@
   "payoff_seconds": 1.5,
   "framing_mode": "safe",
   "hud_regions": [],
-  "game_profile": "generic"
+  "game_profile": "generic",
+  "visual": {
+    "style": "cinematic",
+    "theme": "generic",
+    "accent": null,
+    "game_title": "",
+    "context_text": "",
+    "font": "C:/Windows/Fonts/arialbd.ttf",
+    "font_sha256": null,
+    "logo_sha256": null,
+    "fade_in": 0.35,
+    "background": {
+      "blur_sigma": 9,
+      "brightness": 0.72,
+      "saturation": 0.7,
+      "gradient": 0.22,
+      "stabilization": 0.85
+    },
+    "panel": {
+      "enabled": true,
+      "padding": 8,
+      "margin": 12,
+      "radius": 22,
+      "border": 2,
+      "glow": 0.14,
+      "shadow": 0.22
+    },
+    "safe_zones": {
+      "left": 0.055,
+      "right": 0.16,
+      "top": 0.08,
+      "bottom": 0.2
+    },
+    "branding": {
+      "enabled": false,
+      "name": "",
+      "logo": "",
+      "opacity": 0.65
+    },
+    "progress_line": {
+      "enabled": false,
+      "position": "below",
+      "thickness": 3
+    },
+    "title": {
+      "style": "cinematic",
+      "subtitle": "",
+      "font": "C:/Windows/Fonts/segoeuib.ttf",
+      "font_size": 96,
+      "min_font_size": 44,
+      "max_lines": 3,
+      "subtitle_size": 28,
+      "letter_spacing": 1.5,
+      "shadow_opacity": 0.55,
+      "shadow_blur": 3,
+      "underline": true,
+      "uppercase": true
+    },
+    "title_font_sha256": null
+  }
 }

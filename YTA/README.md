@@ -305,6 +305,113 @@ NVENC and AMF encoders. Encoder availability is not hardware/driver/quality vali
 H.264 remains the default; no GPU mode has been enabled. No 91-minute render or 1–3-hour
 benchmark was performed. See [UPGRADE_VALIDATION.md](UPGRADE_VALIDATION.md) for measured tests.
 
+## Cinematic presentation
+
+New automatic runs default to a conservative cinematic panel with a neutral theme. Existing
+single-clip JSON files without `visual` keep the original renderer. To use the original
+automatic layout explicitly, pass `--visual-style original`. Original composition is tested
+for pixel equality with the previous compositor; selection and audio handling are unchanged.
+
+Generate up to ten DMC5 Shorts (this full-recording command is provided, not run as part of
+the visual upgrade):
+
+```powershell
+python -B workflows\gaming-shorts\auto_shorts.py `
+  --input "videos\DMC5.mp4" `
+  --output-dir "output\dmc5-cinematic-10" `
+  --count 10 `
+  --theme dmc5 `
+  --visual-style cinematic `
+  --title-style cinematic `
+  --subtitle "CINEMATIC GAMEPLAY" `
+  --offline
+```
+
+Add `--analysis-only` to prepare previews and optional review first. Resume with the exact
+same source/settings/output directory and `--resume`, omitting `--analysis-only` to render.
+Use a fresh directory after this code upgrade; existing videos remain intact and old run
+signatures intentionally cannot resume with changed code.
+
+| New option | Behavior |
+|---|---|
+| `--visual-style original\|cinematic` | Chooses composition. Automatic default: cinematic; legacy single-clip default: original. |
+| `--theme generic\|dmc5\|gta5\|gta6\|custom` | Neutral, violet, green, or pink accent, plus a default title for the named games. Independent of `--game-profile` detection. |
+| `--game-title "..."` | User-provided title, at most 120 characters; overrides the theme title. Generic/custom with no supplied title has no title overlay. |
+| `--title-style minimal\|cinematic\|bold` | Responsive typography preset; defaults to cinematic. Separate from `--visual-style`. |
+| `--subtitle "..."` | Optional secondary title, at most 90 characters; empty by default. |
+| `--context-text "..."` | User-provided context, at most 90 characters. No event descriptions are inferred. Empty by default. |
+| `--creator-name "..."` | Supplies a channel name and enables branding. |
+| `--creator-logo "path\logo.png"` | Supplies a local logo and enables branding. No assets are downloaded. |
+| `--branding` / `--no-branding` | Explicitly enables/disables supplied branding. No name/logo is invented. |
+| `--progress-line` / `--no-progress-line` | Playback progress line; disabled by default. |
+| `--blur-intensity 9` | Cinematic Gaussian blur sigma, 0–30, applied at 135×240 working resolution. |
+| `--glow-intensity 0.14` | Cinematic panel glow opacity, 0–0.5. |
+
+All effects are configurable under `visual` through `--settings`. See the working example
+[`cinematic-example.json`](workflows/gaming-shorts/cinematic-example.json):
+
+```powershell
+python -B workflows\gaming-shorts\auto_shorts.py `
+  --input "videos\DMC5.mp4" `
+  --output-dir "output\dmc5-cinematic-preview" `
+  --settings "workflows\gaming-shorts\cinematic-example.json" `
+  --count 2 --max-seconds 120 --analysis-only --offline
+```
+
+Theme selection supplies the accent and known game title only. Background/panel settings
+remain explicit and shared, and custom `visual.accent: [R,G,B]` overrides the theme color.
+The centered title uses local Segoe UI Bold, tracked lettering, a soft shadow and a thin
+accent underline. `visual.title` configures its local `font`, `font_size`, `min_font_size`,
+`max_lines`, `subtitle_size`, `letter_spacing`, `shadow_opacity`, `shadow_blur`, `underline`
+and `uppercase`. Sizes scale from 1080px output width. `visual.fade_in` controls the existing
+short overlay fade; set it to `0` to disable it. No font or asset downloads are required.
+Change `visual.background.brightness`, `saturation`, `gradient` and `stabilization` independently.
+These changes affect the decorative background only; the selected gameplay's colors are retained.
+The background uses the same source frame without frame blending or lag. Global luminance
+compression attenuates exposure flashes, but it does not eliminate local/source flashing or
+make photosensitivity guarantees. It does not brighten a genuinely black source frame.
+
+Panel padding, margin, radius and border are measured in pixels at 1080px output width and
+scale with resolution. The **outer frame** has rounded corners; the full selected gameplay
+rectangle sits inside it so HUD pixels are not masked. Necessary inset can exceed configured
+padding when a large corner radius/border would otherwise cut the gameplay corners. Glow,
+shadow and gradients operate on the small background; text/logo layers are prepared once per
+job and blended only in their small regions. No per-pixel Python loops or new dependencies.
+
+Safe-zone defaults reserve left 5.5%, right 16%, top 8%, and bottom 20% of the canvas for
+decorative text/progress. These are conservative configurable design estimates, **not official
+fixed YouTube coordinates**. UI placement varies by device/app. Decorations also stay out of
+the entire gameplay band, so they cannot cover any source HUD. Existing `hud_regions` still
+protect HUD rectangles during crop selection; safe zones do not reposition the actual YouTube
+controls or guarantee that those controls never cover gameplay.
+
+The layout uses space available across the whole clip, avoiding text jumps as framing changes.
+Titles are centered on the canvas within symmetric bounds that also respect the larger
+right-side safe margin. Names wrap at words (long unbroken names can split), up to three lines,
+and shrink to a readable minimum when needed. The upper gameplay edge determines title space.
+If a crop fills at least 80% of the canvas height at any point, optional overlays and panel
+decoration are disabled for that clip. Subtitles yield to the primary title when necessary;
+optional context is removed if the primary title cannot fit beside it. The title is omitted
+if it still cannot fit at its minimum size. Branding and progress are omitted when they do not fit.
+Long text is fitted within bounded font sizes or omitted, never placed over gameplay.
+New panel defaults reduce margin/padding to 12/8px at 1080px; rounded-corner safety can increase
+the actual inset. The full selected crop remains visible. Saved explicit panel settings still apply.
+
+Reports now show original, cinematic, safe, close and wide alternatives plus the selected
+composition. Review controls can select style/theme/title style and edit title, subtitle and context.
+Export JSON and import with `--review-file` as before. Changes regenerate previews and remain
+for subsequent resumes. Completed videos are locked. Font/logo checksums participate in
+cinematic run identity, including the separate title font; changing supplied assets requires a new run.
+No cloud service is used.
+
+Render metrics now include Python CPU seconds/one-core-equivalent utilization, finished FFmpeg
+CPU seconds on Windows when measurable, output bytes, and Python peak memory. FFmpeg memory
+is not included in the Python memory figure. One-core utilization can exceed 100% for multiple
+threads. See [CINEMATIC_VALIDATION.md](CINEMATIC_VALIDATION.md) for matched before/after results,
+preview locations and limitations. See [TITLE_UPGRADE_VALIDATION.md](TITLE_UPGRADE_VALIDATION.md)
+for the subsequent title upgrade's six-second comparison, tests and measured rendering cost.
+No commit or push is performed automatically.
+
 ## Existing single-clip editor
 
 These commands remain available:

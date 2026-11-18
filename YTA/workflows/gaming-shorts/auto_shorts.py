@@ -18,6 +18,7 @@ import autoframe
 import select_highlights
 import progress
 import review
+import visuals
 from dynamic_crop import (HERE, DEFAULTS, Job, SourceContext, capture, compose, digest,
                           merge, number, project_path, read_json, render, tools, writable_path, generated_path)
 from verify_output import verify
@@ -58,6 +59,8 @@ def run_lock(directory):
 
 
 def validate_settings(settings):
+    if 'visual' in settings:
+        visuals.validate(settings['visual'])
     for key, low, high in [('analysis_fps', 1, 10), ('min_duration', 2, 180),
                            ('max_duration', 2, 180), ('min_score', .05, 1),
                            ('min_gap', 0, 60), ('crop_confidence', .1, 1),
@@ -93,7 +96,7 @@ def validate_settings(settings):
 def code_signature():
     names = ['auto_shorts.py', 'analyze.py', 'select_highlights.py', 'autoframe.py',
              'dynamic_crop.py', 'verify_output.py', 'defaults.json', 'auto_defaults.json',
-             'progress.py', 'review.py', 'game_profiles.py', 'dmc5_title_calibration.json']
+             'progress.py', 'review.py', 'game_profiles.py', 'dmc5_title_calibration.json', 'visuals.py', 'title_layout.py']
     return hashlib.sha256(b''.join((HERE/name).read_bytes() for name in names)).hexdigest()
 
 
@@ -118,7 +121,7 @@ def thumbnail(job, path, frames=None):
     try:
         for column, index in enumerate((0, job.count//2, job.count-1)):
             original = capture(job, index, decoder) if frames is None else frames[index]
-            frame = compose(original, job.plan[index], job.config, job.layer)
+            frame = compose(original, job.plan[index], job.config, job.layer, job.presentation)
             image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).resize((216, 384))
             sheet.paste(image, (column*216, 24))
             draw.text((column*216+5, 5), f'+{index/float(job.fps):.2f}s', fill='white')
@@ -140,6 +143,8 @@ def make_config(defaults, source, target, candidate, data, settings, context):
                   clip={'start_frame': first, 'end_frame': last})
     config['audio']['stream'] = settings['audio_stream']
     config['video'].update(preset=settings['preset'], crf=settings['crf'], threads=settings['threads'])
+    if 'visual' in settings:
+        config['visual'] = copy.deepcopy(settings['visual'])
     config['framing']['keyframes'], framing = autoframe.keyframes(
         data, float(first/fps), float(last/fps), settings, float(fps))
     # Automatic pulses are omitted: motion peaks do not prove that an impact happened.
@@ -156,7 +161,27 @@ def execute(args):
         value = getattr(args, key, None)
         if value is not None:
             settings[key] = value
+    v = settings['visual']
+    for arg, key in [('visual_style','style'),('theme','theme'),('game_title','game_title'),('context_text','context_text')]:
+        if getattr(args,arg,None) is not None:
+            v[key] = getattr(args,arg)
+    for arg,key in [('title_style','style'),('subtitle','subtitle')]:
+        if getattr(args,arg,None) is not None:
+            v['title'][key]=getattr(args,arg)
+    for arg,key in [('creator_name','name'),('creator_logo','logo')]:
+        if getattr(args,arg,None) is not None:
+            v['branding'][key] = getattr(args,arg)
+            v['branding']['enabled'] = True
+    if getattr(args,'branding',None) is not None:
+        v['branding']['enabled'] = args.branding
+    if getattr(args,'progress_line',None) is not None:
+        v['progress_line']['enabled'] = args.progress_line
+    if getattr(args,'blur_intensity',None) is not None:
+        v['background']['blur_sigma'] = args.blur_intensity
+    if getattr(args,'glow_intensity',None) is not None:
+        v['panel']['glow'] = args.glow_intensity
     validate_settings(settings)
+    v.update(visuals.asset_hashes(v, HERE.parents[1]))
     if args.max_seconds is not None:
         number(args.max_seconds, 'max_seconds', settings['min_duration'], 86400)
     source = project_path(args.input)
@@ -281,7 +306,12 @@ def run(args, settings, source, directory):
                 target = project_path(entry['config']['output'])
                 if target.exists():
                     raise ValueError('Review cannot replace an existing video; use a new run')
-                reviewed_settings = dict(settings, framing_mode=entry['review']['framing'])
+                visual = copy.deepcopy(entry['config']['visual'])
+                visual.update(style=entry['review']['visual_style'], theme=entry['review']['theme'], context_text=entry['review']['context_text'])
+                visual['game_title']=entry['review']['game_title']
+                visual['title'].update(style=entry['review']['title_style'],subtitle=entry['review']['subtitle'])
+                visual.update(visuals.asset_hashes(visual, HERE.parents[1]))
+                reviewed_settings = dict(settings, framing_mode=entry['review']['framing'], visual=visual)
                 entry['config'], entry['framing'] = make_config(defaults, source, target, entry['candidate'], data, reviewed_settings, context)
                 Job(entry['config'], context)
         manifest = revised
@@ -291,17 +321,18 @@ def run(args, settings, source, directory):
             atomic_json(project_path(entry['config']['output']).with_suffix('.json'), entry['config'])
     print(manifest['message'], flush=True)
     # Prepare all alternatives and the review page before any expensive encoding.
-    with progress.stage('Preview generation', len(manifest['clips'])*3, 'contact sheets', 'Previews') as meter:
+    variants = [(None,None), ('original',None), ('cinematic',None), (None,'safe'), (None,'close'), (None,'wide')]
+    with progress.stage('Preview generation', len(manifest['clips'])*len(variants), 'contact sheets', 'Previews') as meter:
         for position, entry in enumerate(manifest['clips']):
             if entry['status'] == 'rejected':
-                meter.update((position+1)*3)
+                meter.update((position+1)*len(variants))
                 continue
             signature = hashlib.sha256(json.dumps(entry['config'], sort_keys=True).encode()).hexdigest()
             target = project_path(entry['config']['output'])
-            paths = [target.with_suffix('.jpg')]+[target.with_name(target.stem+f'-{mode}.jpg') for mode in ('close','wide')]
+            paths = [target.with_suffix('.jpg')]+[target.with_name(target.stem+f'-{style or mode}.jpg') for style,mode in variants[1:]]
             if entry.get('preview_signature') == signature and all(p.exists() for p in paths):
                 progress.CURRENT.cache_hits.append(f'previews Short {entry["candidate"]["rank"]}')
-                meter.update((position+1)*3)
+                meter.update((position+1)*len(variants))
                 continue
             try:
                 preview_job = Job(entry['config'], context)
@@ -310,11 +341,14 @@ def run(args, settings, source, directory):
                     frames = {index: capture(preview_job, index, decoder) for index in (0, preview_job.count//2, preview_job.count-1)}
                 finally:
                     decoder.release()
-                for offset, mode in enumerate((None, 'close', 'wide')):
-                    config = entry['config'] if mode is None else make_config(defaults, source, target,
-                        entry['candidate'], data, dict(settings, framing_mode=mode), context)[0]
-                    thumbnail(preview_job if mode is None else Job(config, context), paths[offset], frames)
-                    meter.update(position*3+offset+1)
+                for offset, (style, mode) in enumerate(variants):
+                    config = copy.deepcopy(entry['config']) if mode is None else make_config(defaults, source, target,
+                        entry['candidate'], data, dict(settings, framing_mode=mode, visual=entry['config']['visual']), context)[0]
+                    if style:
+                        config['visual']['style'] = style
+                        config['visual'].update(visuals.asset_hashes(config['visual'], HERE.parents[1]))
+                    thumbnail(preview_job if offset==0 else Job(config, context), paths[offset], frames)
+                    meter.update(position*len(variants)+offset+1)
                 entry['preview_signature'] = signature
                 if entry.get('error', '').startswith('Preview failed:'):
                     entry.pop('error', None)
@@ -403,6 +437,18 @@ def main():
     parser.add_argument('--review-file', help='Apply exported local review JSON; completed videos cannot be changed')
     parser.add_argument('--framing-mode', choices=('safe', 'close', 'wide'), help='Default composition; low confidence still falls back to wide')
     parser.add_argument('--game-profile', choices=('generic', 'dmc5'), help='Optional calibrated DMC5 title-screen suppression; no event recognition')
+    parser.add_argument('--visual-style', choices=('original','cinematic'), help='Presentation only; automatic default is cinematic')
+    parser.add_argument('--theme', choices=tuple(visuals.THEMES), help='Visual accent/title preset; use custom plus --game-title for other games')
+    parser.add_argument('--game-title', help='User-supplied title, up to 120 characters; generic/custom themes have no invented title')
+    parser.add_argument('--title-style', choices=('minimal','cinematic','bold'), help='Responsive typography preset; default cinematic')
+    parser.add_argument('--subtitle', help='Optional user-supplied secondary title line, up to 90 characters')
+    parser.add_argument('--context-text', help='Optional user-supplied context, at most 90 characters; never inferred from motion')
+    parser.add_argument('--creator-name', help='User-supplied channel name; enables branding unless --no-branding')
+    parser.add_argument('--creator-logo', help='Existing local image; enables branding unless --no-branding')
+    parser.add_argument('--branding', action=argparse.BooleanOptionalAction, default=None, help='Enable/disable supplied branding')
+    parser.add_argument('--progress-line', action=argparse.BooleanOptionalAction, default=None, help='Optional playback progress line; off by default')
+    parser.add_argument('--blur-intensity', type=float, help='Cinematic background Gaussian sigma, 0–30 at 135x240 working resolution')
+    parser.add_argument('--glow-intensity', type=float, help='Cinematic panel glow opacity, 0–0.5')
     args = parser.parse_args()
     cv2.setNumThreads(2)
     try:

@@ -46,7 +46,7 @@ def _verify(job, full_decode, meter):
             ok1, original = source.read(); ok2, encoded = output.read()
             if not ok1 or not ok2:
                 raise RuntimeError('Verification could not decode sampled frames')
-            expected = compose(original, job.plan[index], job.config, job.layer)
+            expected = compose(original, job.plan[index], job.config, job.layer, getattr(job,'presentation',None))
             error = float(np.abs(expected.astype(np.float32)-encoded).mean())
             if error > 15:
                 raise RuntimeError(f'Output/source composition mismatch at frame {index}: {error:.2f}')
@@ -78,5 +78,6 @@ def _verify(job, full_decode, meter):
                              'note': 'Silent/constant windows have no meaningful correlation' if correlation is None else 'Aligned'})
         meter.update(4+len(audio_checks))
     return {'frames': job.count, 'dimensions': [job.ow, job.oh], 'duration': job.duration,
+            'visual_layout': job.presentation.report() if getattr(job,'presentation',None) else {'style':'original'},
             'fps': str(job.fps), 'frame_checks': errors, 'audio_checks': audio_checks,
             'full_decode_passed': True, 'note': 'Technical checks do not measure entertainment value.'}

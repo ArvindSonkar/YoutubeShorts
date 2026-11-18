@@ -6,6 +6,8 @@ import json
 import math
 import os
 from urllib.parse import quote
+import visuals
+import title_layout
 
 
 def run_id(manifest):
@@ -37,7 +39,26 @@ def apply_decisions(manifest, review):
         action, framing = decision.get('decision', 'auto'), decision.get('framing', 'safe')
         if action not in ('auto', 'approve', 'reject') or framing not in ('safe', 'wide', 'close'):
             raise ValueError('Invalid review decision/framing')
-        normalized = dict(rank=rank, start=start, end=end, decision=action, framing=framing)
+        v = entry.get('config',{}).get('visual',{})
+        style = decision.get('visual_style', v.get('style','original'))
+        theme = decision.get('theme', v.get('theme','generic'))
+        context = decision.get('context_text', v.get('context_text',''))
+        if style not in ('original','cinematic') or theme not in visuals.THEMES:
+            raise ValueError('Invalid review visual style/theme')
+        if not isinstance(context,str) or len(context)>90 or any(ord(c)<32 for c in context):
+            raise ValueError('Context must be a single user-supplied line of at most 90 characters')
+        titles=title_layout.options(v)
+        title_style=decision.get('title_style',titles['style'])
+        subtitle=decision.get('subtitle',titles['subtitle'])
+        game_title=decision.get('game_title',v.get('game_title',''))
+        if title_style not in title_layout.STYLES:
+            raise ValueError('Invalid review title style')
+        for text,limit in ((subtitle,90),(game_title,120)):
+            if not isinstance(text,str) or len(text)>limit or any(ord(c)<32 for c in text):
+                raise ValueError('Review title/subtitle is too long or contains a line break')
+        normalized = dict(rank=rank, start=start, end=end, decision=action, framing=framing,
+                          visual_style=style, theme=theme, context_text=context,
+                          game_title=game_title,title_style=title_style,subtitle=subtitle)
         if entry.get('review') == normalized:
             continue
         if entry['status'] == 'complete':
@@ -54,12 +75,19 @@ def document(directory, manifest, metrics=None):
     identifier = run_id(manifest)
     rows = []
     decisions = []
+    theme_options=''.join(f'<option>{html.escape(name)}</option>' for name in visuals.THEMES)
     source = quote(os.path.relpath(manifest['signature']['source'], directory).replace('\\', '/'), safe='/.:')
     for entry in manifest.get('clips', []):
         item = entry['candidate']; rank = item['rank']
         original = entry.get('original_candidate', item)
         chosen = entry.get('review', dict(rank=rank, start=item['start'], end=item['end'], decision='auto',
                                          framing=entry.get('framing', {}).get('mode', 'safe')))
+        visual = entry.get('config',{}).get('visual',{})
+        chosen = dict(chosen)
+        titles=title_layout.options(visual)
+        for key, value in [('visual_style',visual.get('style','original')),('theme',visual.get('theme','generic')),('context_text',visual.get('context_text','')),
+                           ('game_title',visual.get('game_title','')),('title_style',titles['style']),('subtitle',titles['subtitle'])]:
+            chosen.setdefault(key,value)
         decisions.append(chosen)
         warnings = '; '.join(item.get('warnings', [])) or 'No heuristic boundary warnings; payoff remains unverified.'
         reasons = html.escape(json.dumps(item.get('reasons', {}), indent=2))
@@ -68,12 +96,22 @@ def document(directory, manifest, metrics=None):
 <p>{item['start']:.3f}–{item['end']:.3f}s · score {item['score']:.3f} · evidence confidence {item.get('confidence', 0):.2f}</p>
 <p>{html.escape(warnings)}</p><details><summary>Selection reasons</summary><pre>{reasons}</pre></details>
 <p>Planned composition</p><img src="clips/short-{rank:02d}.jpg" alt="Planned start, middle and end">
+<details><summary>Compare original and cinematic layouts</summary>
+<p>Original</p><img src="clips/short-{rank:02d}-original.jpg" alt="Original layout">
+<p>Cinematic</p><img src="clips/short-{rank:02d}-cinematic.jpg" alt="Cinematic layout"></details>
 <details><summary>Compare close and wide framing</summary>
+<p>Safe</p><img src="clips/short-{rank:02d}-safe.jpg" alt="Safe framing">
 <p>Close (still falls back when uncertain)</p><img src="clips/short-{rank:02d}-close.jpg" alt="Close alternative">
 <p>Wide</p><img src="clips/short-{rank:02d}-wide.jpg" alt="Wide alternative"></details>
 <details><summary>Play original interval</summary><video controls preload="none" src="{source}#t={item['start']},{item['end']}"></video></details>
 <p><label>Decision <select class="decision"{disabled}><option value="auto">Automatic</option><option value="approve">Approve</option><option value="reject">Reject</option></select></label>
 <label>Framing <select class="framing"{disabled}><option>safe</option><option>close</option><option>wide</option></select></label></p>
+<p><label>Visual style <select class="visual_style"{disabled}><option>original</option><option>cinematic</option></select></label>
+<label>Theme <select class="theme"{disabled}>{theme_options}</select></label></p>
+<p><label>Title style <select class="title_style"{disabled}><option>minimal</option><option>cinematic</option><option>bold</option></select></label></p>
+<p><label>Game title (empty uses theme title) <input class="game_title" maxlength="120" value="{html.escape(chosen['game_title'],quote=True)}"{disabled}></label></p>
+<p><label>Optional subtitle <input class="subtitle" maxlength="90" value="{html.escape(chosen['subtitle'],quote=True)}"{disabled}></label></p>
+<p><label>Optional context (your description) <input class="context_text" maxlength="90" value="{html.escape(chosen['context_text'],quote=True)}"{disabled}></label></p>
 <p><label>Source start (seconds) <input class="start" type="number" step="0.001" min="{original['start']}" max="{original['end']}" value="{item['start']}"{disabled}></label>
 <label>Source end (seconds) <input class="end" type="number" step="0.001" min="{original['start']}" max="{original['end']}" value="{item['end']}"{disabled}></label></p>
 {f'<p><a href="clips/short-{rank:02d}.mp4">Play finished Short</a></p>' if entry['status']=='complete' else ''}
@@ -95,12 +133,12 @@ def document(directory, manifest, metrics=None):
 const initial=PAYLOAD, key='yta-review-'+initial.run_id;
 let saved=initial; try { const old=JSON.parse(localStorage.getItem(key)); if(old && old.run_id===initial.run_id) saved=old; } catch(e) {}
 for(const article of document.querySelectorAll('article')) {
- const item=saved.clips.find(c=>c.rank===Number(article.dataset.rank)); if(!item) continue;
- for(const field of ['decision','framing','start','end']) {
-  const input=article.querySelector('.'+field); if(!input.disabled) input.value=item[field];
+ const item=(article.querySelector('.decision').disabled ? initial : saved).clips.find(c=>c.rank===Number(article.dataset.rank)); if(!item) continue;
+ for(const field of ['decision','framing','start','end','visual_style','theme','context_text','game_title','title_style','subtitle']) {
+  const input=article.querySelector('.'+field); if(item[field]!==undefined) input.value=item[field];
  }
 }
-function collect(){ return {run_id:initial.run_id, clips:[...document.querySelectorAll('article')].filter(a=>!a.querySelector('.decision').disabled).map(a=>({rank:Number(a.dataset.rank),decision:a.querySelector('.decision').value,framing:a.querySelector('.framing').value,start:Number(a.querySelector('.start').value),end:Number(a.querySelector('.end').value)}))}; }
+function collect(){ return {run_id:initial.run_id, clips:[...document.querySelectorAll('article')].filter(a=>!a.querySelector('.decision').disabled).map(a=>({rank:Number(a.dataset.rank),decision:a.querySelector('.decision').value,framing:a.querySelector('.framing').value,start:Number(a.querySelector('.start').value),end:Number(a.querySelector('.end').value),visual_style:a.querySelector('.visual_style').value,theme:a.querySelector('.theme').value,context_text:a.querySelector('.context_text').value,game_title:a.querySelector('.game_title').value,title_style:a.querySelector('.title_style').value,subtitle:a.querySelector('.subtitle').value}))}; }
 document.addEventListener('change',()=>{try {localStorage.setItem(key,JSON.stringify(collect()));document.getElementById('status').textContent='Draft saved in this browser. Export JSON to apply it to Python.';}catch(e){document.getElementById('status').textContent='Browser storage unavailable. Export JSON to retain your decisions.';}});
 document.getElementById('export').onclick=()=>{
  if(![...document.querySelectorAll('input')].every(i=>i.checkValidity())) {alert('Check trim bounds.');return;}

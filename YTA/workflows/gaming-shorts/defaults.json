@@ -5,9 +5,21 @@
   "source": "",
   "output": "",
   "expected_source_sha256": null,
-  "clip": {"start": "00:00.000", "end": "00:20.000"},
-  "video": {"width": 1080, "height": 1920, "crf": 18, "preset": "medium", "threads": 4},
-  "audio": {"stream": 0, "bitrate": "192k"},
+  "clip": {
+    "start": "00:00.000",
+    "end": "00:20.000"
+  },
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "crf": 18,
+    "preset": "medium",
+    "threads": 4
+  },
+  "audio": {
+    "stream": 0,
+    "bitrate": "192k"
+  },
   "framing": {
     "enabled": true,
     "min_width": 0.25,
@@ -29,7 +41,75 @@
     "sigma_seconds": 0.16,
     "max_strength": 0.04
   },
-  "background": {"enabled": true, "blur_sigma": 9, "brightness": 0.48, "color": [12, 16, 24]},
+  "background": {
+    "enabled": true,
+    "blur_sigma": 9,
+    "brightness": 0.48,
+    "color": [
+      12,
+      16,
+      24
+    ]
+  },
+  "visual": {
+    "style": "original",
+    "theme": "generic",
+    "accent": null,
+    "game_title": "",
+    "context_text": "",
+    "font": "C:/Windows/Fonts/arialbd.ttf",
+    "font_sha256": null,
+    "logo_sha256": null,
+    "fade_in": 0.35,
+    "background": {
+      "blur_sigma": 9,
+      "brightness": 0.72,
+      "saturation": 0.7,
+      "gradient": 0.22,
+      "stabilization": 0.85
+    },
+    "panel": {
+      "enabled": true,
+      "padding": 8,
+      "margin": 12,
+      "radius": 22,
+      "border": 2,
+      "glow": 0.14,
+      "shadow": 0.22
+    },
+    "safe_zones": {
+      "left": 0.055,
+      "right": 0.16,
+      "top": 0.08,
+      "bottom": 0.2
+    },
+    "branding": {
+      "enabled": false,
+      "name": "",
+      "logo": "",
+      "opacity": 0.65
+    },
+    "progress_line": {
+      "enabled": false,
+      "position": "below",
+      "thickness": 3
+    },
+    "title": {
+      "style": "cinematic",
+      "subtitle": "",
+      "font": "C:/Windows/Fonts/segoeuib.ttf",
+      "font_size": 96,
+      "min_font_size": 44,
+      "max_lines": 3,
+      "subtitle_size": 28,
+      "letter_spacing": 1.5,
+      "shadow_opacity": 0.55,
+      "shadow_blur": 3,
+      "underline": true,
+      "uppercase": true
+    },
+    "title_font_sha256": null
+  },
   "hook": {
     "enabled": false,
     "animated": true,
@@ -40,13 +120,32 @@
     "fade_out": 0.28,
     "initial_opacity": 0.45,
     "slide_pixels": 24,
-    "position": [0.08, 0.094],
-    "size": [0.80, 0.172],
-    "safe_area": [0.06, 0.08, 0.92, 0.80],
+    "position": [
+      0.08,
+      0.094
+    ],
+    "size": [
+      0.8,
+      0.172
+    ],
+    "safe_area": [
+      0.06,
+      0.08,
+      0.92,
+      0.8
+    ],
     "font": "C:/Windows/Fonts/arialbd.ttf",
     "font_size": 100,
-    "accent": [193, 158, 255],
-    "text_color": [247, 247, 252],
+    "accent": [
+      193,
+      158,
+      255
+    ],
+    "text_color": [
+      247,
+      247,
+      252
+    ],
     "panel_opacity": 190
   }
 }

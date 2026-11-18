@@ -1,0 +1,61 @@
+{
+  "visual": {
+    "style": "cinematic",
+    "theme": "dmc5",
+    "game_title": "DEVIL MAY CRY 5",
+    "context_text": "",
+    "accent": [
+      180,
+      135,
+      255
+    ],
+    "background": {
+      "blur_sigma": 9,
+      "brightness": 0.72,
+      "saturation": 0.7,
+      "gradient": 0.22,
+      "stabilization": 0.85
+    },
+    "panel": {
+      "enabled": true,
+      "padding": 8,
+      "margin": 12,
+      "radius": 22,
+      "border": 2,
+      "glow": 0.14,
+      "shadow": 0.22
+    },
+    "safe_zones": {
+      "left": 0.055,
+      "right": 0.16,
+      "top": 0.08,
+      "bottom": 0.2
+    },
+    "branding": {
+      "enabled": false,
+      "name": "",
+      "logo": "",
+      "opacity": 0.65
+    },
+    "progress_line": {
+      "enabled": false,
+      "position": "below",
+      "thickness": 3
+    },
+    "title": {
+      "style": "cinematic",
+      "subtitle": "",
+      "font": "C:/Windows/Fonts/segoeuib.ttf",
+      "font_size": 96,
+      "min_font_size": 44,
+      "max_lines": 3,
+      "subtitle_size": 28,
+      "letter_spacing": 1.5,
+      "shadow_opacity": 0.55,
+      "shadow_blur": 3,
+      "underline": true,
+      "uppercase": true
+    },
+    "title_font_sha256": null
+  }
+}

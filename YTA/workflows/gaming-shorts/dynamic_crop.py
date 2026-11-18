@@ -16,7 +16,8 @@ import sys
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from progress import stage, checked_output, decode_check
+from progress import stage, checked_output, decode_check, child_cpu_seconds, peak_memory
+import visuals
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -110,6 +111,8 @@ def number(value, name, low, high):
 
 
 def validate(config):
+    if 'visual' in config:
+        visuals.validate(config['visual'])
     if config['schema_version'] != 1 or config['preferred_style'] != 'dynamic_crop':
         raise ValueError('Only schema_version 1 / dynamic_crop is supported')
     for section in ('framing', 'smoothing', 'impacts', 'background', 'hook'):
@@ -276,6 +279,9 @@ class Job:
             raise ValueError('Source checksum differs from the configured example')
         self.layer = make_hook(config, self.ow, self.oh) if config['hook']['enabled'] else None
         self.plan = camera_plan(config, self.sw, self.sh, self.ow, self.oh, float(self.fps), self.count)
+        self.presentation = visuals.Presentation(config, self.plan, ROOT) if config.get('visual', {}).get('style')=='cinematic' else None
+        if self.presentation and self.layer is not None:
+            raise ValueError('Legacy hook overlays must be disabled for cinematic styling; use visual.context_text')
 
     def check_timestamps(self):
         # Read only the selected interval (plus the preceding keyframe), then check its PTS grid.
@@ -381,7 +387,11 @@ def make_hook(config, ow, oh):
     return cv2.cvtColor(np.array(layer),cv2.COLOR_RGBA2BGRA)
 
 
-def compose(frame, geometry, config, layer=None):
+def compose(frame, geometry, config, layer=None, presentation=None):
+    if config.get('visual', {}).get('style') == 'cinematic':
+        if presentation is None:
+            raise ValueError('Cinematic composition requires its prepared presentation plan')
+        return presentation.compose(frame, geometry)
     ow,oh=config['video']['width'],config['video']['height']
     sw,sh=frame.shape[1],frame.shape[0]
     x,y,w,h=(geometry[k] for k in ('x','y','width','height'))
@@ -422,6 +432,8 @@ def artifacts(path, job):
     write_new_json(path/'effective-config.json',job.config)
     write_new_json(path/'source-ffprobe.json',job.meta)
     write_new_json(path/'camera-plan.json',job.plan)
+    if getattr(job, 'presentation', None):
+        write_new_json(path/'visual-layout.json',job.presentation.report())
     return path
 
 
@@ -451,7 +463,7 @@ def preview(job, directory, raw=False, step=1):
             for index in indices[start:start+per_sheet]:
                 frame=capture(job,index,decoder)
                 if not raw:
-                    frame=compose(frame,job.plan[index],job.config,job.layer)
+                    frame=compose(frame,job.plan[index],job.config,job.layer,job.presentation)
                 rgb=Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
                 rgb.save(directory/f'frame-{index:06d}.jpg',quality=93)
                 width=432 if raw else 216
@@ -501,7 +513,7 @@ def render(job, label='Rendering Short'):
                 ok,frame=cap.read()
                 if not ok or round(cap.get(cv2.CAP_PROP_POS_FRAMES))-1 != job.first+index:
                     raise ValueError('Decoder frame position changed unexpectedly')
-                process.stdin.write(compose(frame,job.plan[index],job.config,job.layer).tobytes())
+                process.stdin.write(compose(frame,job.plan[index],job.config,job.layer,getattr(job,'presentation',None)).tobytes())
                 meter.update(index+1)
             process.stdin.close()
             # All input frames have been submitted, but buffered encoding is not done.
@@ -516,6 +528,8 @@ def render(job, label='Rendering Short'):
             if process.returncode!=0:
                 raise RuntimeError(f'FFmpeg failed; inspect {directory / "render.log"}')
             meter.name, meter.total = label, job.count
+            meter.details.update(encoder_cpu_seconds=child_cpu_seconds(process), output_bytes=pending.stat().st_size,
+                                 python_peak_memory_bytes=peak_memory(), visual_style=job.config.get('visual',{}).get('style','original'))
         except BaseException:
             process.kill(); process.wait()
             raise

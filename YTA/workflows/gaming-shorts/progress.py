@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -31,6 +32,8 @@ class Stage:
         self.clock, self.emit, self.interval = clock, emit, interval
         self.recorder = recorder
         self.started = clock()
+        self.cpu_started = time.process_time()
+        self.details = {}
         self.started_at = timestamp()
         self.done = 0.
         self.last = -float('inf')
@@ -41,9 +44,12 @@ class Stage:
         speed = self.done/elapsed if elapsed > 0 and self.done > 0 else None
         percent = 100*min(1., self.done/self.total) if self.total else None
         eta = max(0., self.total-self.done)/speed if self.total and speed and elapsed >= 1 else None
+        cpu = max(0., time.process_time()-self.cpu_started)
         return dict(name=self.name, category=self.category, started_at=self.started_at,
                     elapsed_seconds=elapsed, processed=self.done, total=self.total, unit=self.unit,
-                    percent=percent, speed_per_second=speed, eta_seconds=eta)
+                    percent=percent, speed_per_second=speed, eta_seconds=eta,
+                    python_cpu_seconds=cpu, python_cpu_percent_one_core=100*cpu/elapsed if elapsed else None,
+                    logical_cpu_count=os.cpu_count(), details=self.details)
 
     def update(self, done=None, force=False):
         if done is not None:
@@ -103,6 +109,23 @@ def peak_memory():
             value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             return int(value if sys.platform == 'darwin' else value*1024)
     except (ImportError, OSError, AttributeError):
+        pass
+    return None
+
+
+def child_cpu_seconds(process):
+    """CPU used by this finished encoder on Windows, while its process handle is open."""
+    if sys.platform != 'win32':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+        values=[wintypes.FILETIME() for _ in range(4)]
+        kernel.GetProcessTimes.argtypes=[wintypes.HANDLE]+[ctypes.POINTER(wintypes.FILETIME)]*4
+        if kernel.GetProcessTimes(wintypes.HANDLE(int(process._handle)),*[ctypes.byref(v) for v in values]):
+            return sum((v.dwHighDateTime<<32)+v.dwLowDateTime for v in values[2:])/1e7
+    except (OSError,AttributeError,TypeError,ValueError):
         pass
     return None
 
