@@ -19,6 +19,8 @@ import select_highlights
 import progress
 import review
 import visuals
+import editing
+import candidate_exchange
 from dynamic_crop import (HERE, DEFAULTS, Job, SourceContext, capture, compose, digest,
                           merge, number, project_path, read_json, render, tools, writable_path, generated_path)
 from verify_output import verify
@@ -59,6 +61,13 @@ def run_lock(directory):
 
 
 def validate_settings(settings):
+    if settings.get('editing_preset','auto') not in editing.PRESETS:
+        raise ValueError('editing_preset must be auto, action, funny or cinematic')
+    number(settings.get('highlight_diversity',.5),'highlight_diversity',0,1)
+    if type(settings.get('moment_aware_boundaries',True)) is not bool:
+        raise ValueError('moment_aware_boundaries must be a boolean')
+    editing.validate_effects(settings.get('effects',{}))
+    editing.validate_regions(settings.get('hud_regions',[]))
     if 'visual' in settings:
         visuals.validate(settings['visual'])
     for key, low, high in [('analysis_fps', 1, 10), ('min_duration', 2, 180),
@@ -82,21 +91,13 @@ def validate_settings(settings):
         raise ValueError('framing_mode must be safe, close or wide')
     if settings.get('game_profile', 'generic') not in ('generic', 'dmc5'):
         raise ValueError('game_profile must be generic or dmc5')
-    if not isinstance(settings.get('hud_regions', []), list):
-        raise ValueError('hud_regions must be a list of normalized rectangles')
-    for box in settings.get('hud_regions', []):
-        if not isinstance(box, list) or len(box) != 4:
-            raise ValueError('HUD rectangle needs left, top, right, bottom')
-        for value in box:
-            number(value, 'HUD coordinate', 0, 1)
-        if box[0] >= box[2] or box[1] >= box[3]:
-            raise ValueError('HUD rectangle must have positive area')
 
 
 def code_signature():
     names = ['auto_shorts.py', 'analyze.py', 'select_highlights.py', 'autoframe.py',
              'dynamic_crop.py', 'verify_output.py', 'defaults.json', 'auto_defaults.json',
-             'progress.py', 'review.py', 'game_profiles.py', 'dmc5_title_calibration.json', 'visuals.py', 'title_layout.py']
+             'progress.py', 'review.py', 'game_profiles.py', 'dmc5_title_calibration.json', 'visuals.py', 'title_layout.py',
+             'moments.py','editing.py','candidate_exchange.py','audio_quality.py']
     return hashlib.sha256(b''.join((HERE/name).read_bytes() for name in names)).hexdigest()
 
 
@@ -144,30 +145,50 @@ def make_config(defaults, source, target, candidate, data, settings, context):
     config['audio']['stream'] = settings['audio_stream']
     config['video'].update(preset=settings['preset'], crf=settings['crf'], threads=settings['threads'])
     if 'visual' in settings:
-        config['visual'] = copy.deepcopy(settings['visual'])
+        config['visual'],edit_report=editing.apply(settings['visual'],candidate,settings.get('editing_preset','auto'),settings.get('_visual_overrides'))
+        config['visual'].update(visuals.asset_hashes(config['visual'],HERE.parents[1]))
+        config['editing_preset']=edit_report['selected']
+        config['editing_requested']=settings.get('editing_preset','auto')
+    else:
+        edit_report={'selected':'neutral','requested':'auto'}
     config['framing']['keyframes'], framing = autoframe.keyframes(
         data, float(first/fps), float(last/fps), settings, float(fps))
     # Automatic pulses are omitted: motion peaks do not prove that an impact happened.
     config['impacts']['enabled'] = False
+    config['effects']=copy.deepcopy(settings.get('effects',editing.EMPTY_EFFECTS))
+    config['framing']['protected_regions']=copy.deepcopy(settings.get('hud_regions',[]))
+    config['framing']['anticipate_widening']=True
     config['smoothing'].update(max_pan_per_second=.18, max_width_change_per_second=.20)
+    framing['editing']=edit_report
     return config, framing
 
 
 def execute(args):
     settings = read_json(HERE/'auto_defaults.json')
+    supplied={}
     if args.settings:
-        settings = merge(settings, read_json(args.settings))
+        supplied=read_json(args.settings)
+        settings = merge(settings, supplied)
+    settings['_visual_overrides']=[[section,key,value] for section,keys in supplied.get('visual',{}).items()
+        if section in ('panel','title') for key,value in keys.items()]
     for key in settings:
         value = getattr(args, key, None)
         if value is not None:
             settings[key] = value
     v = settings['visual']
-    for arg, key in [('visual_style','style'),('theme','theme'),('game_title','game_title'),('context_text','context_text')]:
+    for arg, key in [('visual_style','style'),('theme','theme'),('game_title','game_title'),('context_text','context_text'),
+                     ('hook_text','hook_text'),('title_placement','title_placement')]:
         if getattr(args,arg,None) is not None:
             v[key] = getattr(args,arg)
     for arg,key in [('title_style','style'),('subtitle','subtitle')]:
         if getattr(args,arg,None) is not None:
             v['title'][key]=getattr(args,arg)
+            settings['_visual_overrides'].append(['title',key,getattr(args,arg)])
+    if getattr(args,'hud_safe_config',None):
+        hud=read_json(project_path(args.hud_safe_config))
+        if not isinstance(hud,dict) or set(hud)!={'regions'}:
+            raise ValueError('HUD file must contain exactly a regions list of normalized rectangles')
+        settings['hud_regions']=hud['regions']
     for arg,key in [('creator_name','name'),('creator_logo','logo')]:
         if getattr(args,arg,None) is not None:
             v['branding'][key] = getattr(args,arg)
@@ -180,6 +201,7 @@ def execute(args):
         v['background']['blur_sigma'] = args.blur_intensity
     if getattr(args,'glow_intensity',None) is not None:
         v['panel']['glow'] = args.glow_intensity
+        settings['_visual_overrides'].append(['panel','glow',args.glow_intensity])
     validate_settings(settings)
     v.update(visuals.asset_hashes(v, HERE.parents[1]))
     if args.max_seconds is not None:
@@ -213,8 +235,8 @@ def execute(args):
                         successful=sum(e['status']=='complete' for e in entries),
                         failed=sum(e['status']=='failed' for e in entries),
                         rejected=sum(e['status']=='rejected' for e in entries),
-                        generated_video_seconds=sum((e['config']['clip']['end_frame']-e['config']['clip']['start_frame'])/
-                            float(Fraction(e.get('source_fps', '30'))) for e in entries if e['status']=='complete'))
+                        generated_video_seconds=sum(e.get('output_duration',(e['config']['clip']['end_frame']-e['config']['clip']['start_frame'])/
+                            float(Fraction(e.get('source_fps', '30')))) for e in entries if e['status']=='complete'))
                     manifest['last_invocation_status'] = outcome
                     atomic_json(path, manifest)
                     with progress.stage('HTML report generation', 1, 'report', 'HTML report') as meter:
@@ -270,15 +292,25 @@ def run(args, settings, source, directory):
         data = analyze.scan(context, duration, settings)
         with progress.stage('Saving analysis cache', category='Cache'):
             analyze.save_features(cache, data, signature)
-    if not manifest.get('selection_done'):
+    rerank_document=read_json(project_path(args.rerank_file)) if getattr(args,'rerank_file',None) else None
+    rerank_changed=rerank_document is not None and rerank_document!=manifest.get('rerank_document')
+    if rerank_changed and any(e['status']=='complete' or e.get('review') or project_path(e['config']['output']).exists() for e in manifest['clips']):
+        raise ValueError('Rerank before manual review/rendering, or use a fresh output directory')
+    if not manifest.get('selection_done') or rerank_changed:
         candidates, scores = select_highlights.candidate_windows(data, duration, settings)
+        for c in candidates:
+            c['candidate_id']=candidate_exchange.identify(c,context.sha256)
+        if rerank_document:
+            candidates=candidate_exchange.apply_scores(signature,candidates,rerank_document)
+            manifest['rerank_document']=rerank_document
         with progress.stage('Candidate diversity and overlap removal', category='Selection'):
-            selected = select_highlights.choose(candidates, settings['count'], duration, settings['min_gap'])
+            selected = select_highlights.choose(candidates, settings['count'], duration, settings['min_gap'],settings.get('highlight_diversity',.5))
         progress.CURRENT.counts['candidates'] = len(candidates)
         atomic_json(directory/'candidates.json', {'candidates': candidates, 'selected': selected,
                     'note': 'Heuristic activity scores, not event recognition or predicted views.'})
         np.savez_compressed(directory/'scores.npz', time=data['time'], score=scores)
         (directory/'clips').mkdir(exist_ok=True)
+        manifest['clips']=[]
         with progress.stage('Automatic framing', len(selected), 'clips', 'Framing') as meter:
             for candidate in selected:
                 rank = candidate['rank']
@@ -297,6 +329,9 @@ def run(args, settings, source, directory):
     else:
         progress.CURRENT.cache_hits.append('candidate selection and framing plan')
         progress.CURRENT.counts['candidates'] = len(read_json(directory/'candidates.json')['candidates'])
+    if getattr(args,'export_candidates',False):
+        with progress.stage('Candidate metadata and sampled frame export',category='Previews'):
+            candidate_exchange.export(directory,source,signature,read_json(directory/'candidates.json')['candidates'],frames=True)
     if getattr(args, 'review_file', None):
         decisions = read_json(project_path(args.review_file))
         revised = review.apply_decisions(manifest, decisions)
@@ -306,12 +341,15 @@ def run(args, settings, source, directory):
                 target = project_path(entry['config']['output'])
                 if target.exists():
                     raise ValueError('Review cannot replace an existing video; use a new run')
-                visual = copy.deepcopy(entry['config']['visual'])
+                visual = copy.deepcopy(settings['visual'])
                 visual.update(style=entry['review']['visual_style'], theme=entry['review']['theme'], context_text=entry['review']['context_text'])
                 visual['game_title']=entry['review']['game_title']
                 visual['title'].update(style=entry['review']['title_style'],subtitle=entry['review']['subtitle'])
+                visual.update(hook_text=entry['review']['hook_text'],title_placement=entry['review']['title_placement'],reaction=entry['review']['reaction'])
                 visual.update(visuals.asset_hashes(visual, HERE.parents[1]))
-                reviewed_settings = dict(settings, framing_mode=entry['review']['framing'], visual=visual)
+                reviewed_settings = dict(settings, framing_mode=entry['review']['framing'], visual=visual,
+                    editing_preset=entry['review']['editing_preset'],effects=entry['review']['effects'],hud_regions=entry['review']['hud_regions'],
+                    _visual_overrides=settings['_visual_overrides']+[['title','style',entry['review']['title_style']],['title','subtitle',entry['review']['subtitle']]])
                 entry['config'], entry['framing'] = make_config(defaults, source, target, entry['candidate'], data, reviewed_settings, context)
                 Job(entry['config'], context)
         manifest = revised
@@ -336,6 +374,7 @@ def run(args, settings, source, directory):
                 continue
             try:
                 preview_job = Job(entry['config'], context)
+                entry['output_duration']=preview_job.duration
                 decoder = cv2.VideoCapture(str(source))
                 try:
                     frames = {index: capture(preview_job, index, decoder) for index in (0, preview_job.count//2, preview_job.count-1)}
@@ -343,7 +382,9 @@ def run(args, settings, source, directory):
                     decoder.release()
                 for offset, (style, mode) in enumerate(variants):
                     config = copy.deepcopy(entry['config']) if mode is None else make_config(defaults, source, target,
-                        entry['candidate'], data, dict(settings, framing_mode=mode, visual=entry['config']['visual']), context)[0]
+                        entry['candidate'], data, dict(settings, framing_mode=mode, visual=entry['config']['visual'],
+                        effects=entry['config'].get('effects',{}),editing_preset=entry['config'].get('editing_requested','auto'),
+                        hud_regions=entry['config']['framing'].get('protected_regions',[])), context)[0]
                     if style:
                         config['visual']['style'] = style
                         config['visual'].update(visuals.asset_hashes(config['visual'], HERE.parents[1]))
@@ -391,7 +432,8 @@ def run(args, settings, source, directory):
                 progress.CURRENT.counts['rendered_this_invocation'] = progress.CURRENT.counts.get('rendered_this_invocation', 0)+1
                 result = verify(job, full_decode=False)  # render already did a complete decode.
             atomic_json(job.target.with_suffix('.qa.json'), result)
-            entry.update(status='complete', output_sha256=digest(job.target))
+            entry['qa_summary']=result.get('audio_quality')
+            entry.update(status='complete', output_sha256=digest(job.target),output_duration=job.duration)
             entry.pop('error', None)
         except KeyboardInterrupt:
             entry.update(status='interrupted', error='Interrupted; partial artifacts retained for resume')
@@ -415,7 +457,7 @@ def run(args, settings, source, directory):
     return 1 if failures else (2 if not manifest['clips'] else 0)
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', required=True)
     parser.add_argument('--output-dir', required=True, help='Must be inside YTA/output')
@@ -437,6 +479,14 @@ def main():
     parser.add_argument('--review-file', help='Apply exported local review JSON; completed videos cannot be changed')
     parser.add_argument('--framing-mode', choices=('safe', 'close', 'wide'), help='Default composition; low confidence still falls back to wide')
     parser.add_argument('--game-profile', choices=('generic', 'dmc5'), help='Optional calibrated DMC5 title-screen suppression; no event recognition')
+    parser.add_argument('--editing-preset',choices=editing.PRESETS,help='Automatic activity suggestion or manual editing preset; uncertain clips remain neutral')
+    parser.add_argument('--hook-text',help='User-provided moment hook; no events are inferred')
+    parser.add_argument('--title-placement',choices=('auto','top','bottom'),help='Safe text band; auto prefers above gameplay')
+    parser.add_argument('--hud-safe-config',help='Local JSON with regions: [[left,top,right,bottom], ...], normalized source coordinates')
+    parser.add_argument('--highlight-diversity',type=float,help='0 to 1; diversity preference among comparable-quality clips (default .5)')
+    parser.add_argument('--moment-aware-boundaries',action=argparse.BooleanOptionalAction,default=None,help='Activity/context boundary refinement; enabled by default')
+    parser.add_argument('--export-candidates',action='store_true',help='Export local candidate metadata and at most 60 sampled frames; never uploads')
+    parser.add_argument('--rerank-file',help='Import validated version-1 external scores before review/render; optional, no model execution')
     parser.add_argument('--visual-style', choices=('original','cinematic'), help='Presentation only; automatic default is cinematic')
     parser.add_argument('--theme', choices=tuple(visuals.THEMES), help='Visual accent/title preset; use custom plus --game-title for other games')
     parser.add_argument('--game-title', help='User-supplied title, up to 120 characters; generic/custom themes have no invented title')
@@ -449,7 +499,11 @@ def main():
     parser.add_argument('--progress-line', action=argparse.BooleanOptionalAction, default=None, help='Optional playback progress line; off by default')
     parser.add_argument('--blur-intensity', type=float, help='Cinematic background Gaussian sigma, 0–30 at 135x240 working resolution')
     parser.add_argument('--glow-intensity', type=float, help='Cinematic panel glow opacity, 0–0.5')
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
     cv2.setNumThreads(2)
     try:
         return execute(args)

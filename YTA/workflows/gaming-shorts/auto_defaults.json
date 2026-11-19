@@ -3,8 +3,8 @@
   "analysis_width": 320,
   "audio_stream": 0,
   "count": 15,
-  "min_duration": 20.0,
-  "max_duration": 55.0,
+  "min_duration": 15.0,
+  "max_duration": 40.0,
   "min_score": 0.3,
   "min_gap": 5.0,
   "crop_confidence": 0.6,
@@ -75,6 +75,21 @@
       "underline": true,
       "uppercase": true
     },
-    "title_font_sha256": null
+    "title_font_sha256": null,
+    "hook_text": "",
+    "title_placement": "auto",
+    "reaction": {
+      "text": "",
+      "start": 0.0,
+      "end": 0.0
+    }
+  },
+  "editing_preset": "auto",
+  "highlight_diversity": 0.5,
+  "moment_aware_boundaries": true,
+  "effects": {
+    "punch_ins": [],
+    "slow_motion": [],
+    "replays": []
   }
 }

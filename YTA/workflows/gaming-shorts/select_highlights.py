@@ -1,6 +1,7 @@
 """Explainable action ranking, boundary selection, and non-overlapping diversity."""
 import numpy as np
 from progress import stage
+import moments
 
 
 def local_scale(values, fps, floor):
@@ -41,6 +42,9 @@ def action_scores(data, fps):
                             np.ones(width)/width, mode='valid')
     scores *= .55+.45*sustained
     scores *= 1-np.clip(data.get('screen_penalty', np.zeros_like(scores)), 0, 1)
+    cues=moments.signals(data,fps)
+    scores=np.maximum(scores+.10*cues['contrast']+.08*cues['onset'],.42*cues['quiet'])
+    scores *= 1-cues['screen']
     scores = np.clip(scores, 0, 1)
     radius = max(1, round(fps))
     padded = np.pad(scores, (radius, radius), mode='edge')
@@ -55,6 +59,7 @@ def candidate_windows(data, duration, settings):
 def _candidate_windows(data, duration, settings, meter):
     fps = settings['analysis_fps']
     scores = action_scores(data, fps)
+    cues=moments.signals(data,fps)
     minimum, maximum = settings['min_duration'], settings['max_duration']
     if duration < minimum:
         return [], scores
@@ -102,6 +107,9 @@ def _candidate_windows(data, duration, settings, meter):
                 a0, b0 = np.searchsorted(times, [s, min(end, s+settings.get('opening_seconds', 2.))])
                 return float(scores[a0:max(a0+1,b0)].mean())-.015*(s-start)
             start = float(max(options, key=opening_value))
+        boundary={'method':'legacy activity boundaries','semantic_payoff_verified':False,'dialogue_verified':False}
+        if settings.get('moment_aware_boundaries',True):
+            start,end,boundary=moments.boundaries(data,scores,peak,duration,settings)
         a, b = np.searchsorted(times, [start, end])
         b = max(a+1, min(len(scores), b))
         segment = scores[a:b]
@@ -111,14 +119,17 @@ def _candidate_windows(data, duration, settings, meter):
         opening_end = min(b, a+max(1, round(settings.get('opening_seconds', 2.)*fps)))
         opening = float(scores[a:opening_end].mean())
         ending = float(scores[max(a,b-round(2*fps)):b].mean())
-        screen_fraction = float(np.mean(screen_penalties[a:b]))
+        screen_fraction = float(np.mean(np.maximum(screen_penalties[a:b],cues['screen'][a:b])))
         local_active = data['motion'][a:b] > .012
         sustained_fraction = float(np.mean(local_active))
         quality = .55*float(segment.mean()) + .25*float(np.percentile(segment, 85)) + .20*active_fraction
         quality = .8*quality+.2*opening
         quality -= .30*darkness + .25*cut_fraction + .5*screen_fraction
         quality -= .12*(1-sustained_fraction)
-        if quality < settings['min_score'] or active_fraction < .25 or darkness > .35:
+        quiet=float(cues['quiet'][a:b].mean())
+        contrast=float(cues['contrast'][a:b].max())
+        quality=max(quality,.48*quiet+.20*opening+.12*contrast-.5*screen_fraction-.3*darkness)
+        if quality < settings['min_score'] or (active_fraction < .25 and quiet < .45) or darkness > .35:
             continue
         marks = np.linspace(a, b-1, 5).astype(int)
         warnings = []
@@ -133,6 +144,7 @@ def _candidate_windows(data, duration, settings, meter):
                            'score': round(float(quality), 5),
                            'confidence': round(confidence, 4), 'warnings': warnings,
                            'confidence_note': 'Heuristic evidence strength, not a calibrated event probability',
+                           'metadata_version':1,'boundary':boundary,
                            'fingerprints': data['fingerprint'][marks].tolist(),
                            'reasons': {'mean_action': round(float(segment.mean()), 4),
                                        'peak_action': round(float(scores[peak]), 4),
@@ -143,6 +155,14 @@ def _candidate_windows(data, duration, settings, meter):
                                        'screen_penalty': round(screen_fraction, 4),
                                        'dark_fraction': round(darkness, 4),
                                        'cut_fraction': round(cut_fraction, 4)}})
+        item=candidates[-1]
+        item['reasons'].update(motion_score=round(float(cues['motion'][a:b].mean()),4),
+            audio_score=round(float(cues['audio'][a:b].mean()),4),quiet_interest=round(quiet,4),
+            activity_contrast=round(contrast,4),sudden_change=round(float(cues['onset'][a:b].max()),4))
+        item['suggested_editing']=moments.suggest(item['reasons'])
+        item['activity_pattern']=moments.pattern(item['reasons'])
+        if boundary['method']!='legacy activity boundaries':
+            warnings.append('Activity boundaries cannot verify dialogue completion or semantic payoff')
     # Multiple peaks can refine to the exact same interval.
     unique = {}
     for item in candidates:
@@ -158,7 +178,7 @@ def duplicate(a, b):
     return bool(distances) and sum(d < 6 for d in distances) >= 4
 
 
-def choose(candidates, count, duration, min_gap):
+def choose(candidates, count, duration, min_gap, diversity=.5):
     remaining = list(candidates)
     selected = []
     bucket_size = max(60., duration/8)
@@ -166,11 +186,15 @@ def choose(candidates, count, duration, min_gap):
         def diversified(item):
             bucket = int(item['peak']/bucket_size)
             seen = sum(int(p['peak']/bucket_size) == bucket for p in selected)
-            return item['score'] - .06*seen, -item['start']
-        winner = max(remaining, key=diversified)
+            similar=sum(p.get('activity_pattern')==item.get('activity_pattern') for p in selected) if item.get('activity_pattern') else 0
+            return item['score'] - diversity*(.08*seen+.04*similar), -item['start']
+        # Diversity only breaks ties among comparable-quality candidates (within .08).
+        best=max(item['score'] for item in remaining)
+        winner = max((item for item in remaining if item['score']>=best-.08*diversity), key=diversified)
         remaining.remove(winner)
         if any(not (winner['end']+min_gap <= old['start'] or old['end']+min_gap <= winner['start'])
                or duplicate(winner, old) for old in selected):
             continue
-        selected.append(dict(winner, rank=len(selected)+1))
+        selected.append(dict(winner, rank=len(selected)+1,selection_reason='Quality first; non-overlap and fingerprint deduplication; temporal/pattern diversity among comparable scores',
+                             diversity_adjusted_score=round(diversified(winner)[0],5)))
     return selected

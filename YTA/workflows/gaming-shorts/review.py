@@ -8,6 +8,7 @@ import os
 from urllib.parse import quote
 import visuals
 import title_layout
+import editing
 
 
 def run_id(manifest):
@@ -56,9 +57,29 @@ def apply_decisions(manifest, review):
         for text,limit in ((subtitle,90),(game_title,120)):
             if not isinstance(text,str) or len(text)>limit or any(ord(c)<32 for c in text):
                 raise ValueError('Review title/subtitle is too long or contains a line break')
+        preset=decision.get('editing_preset',entry.get('config',{}).get('editing_requested','auto'))
+        if preset not in editing.PRESETS:
+            raise ValueError('Invalid editing preset')
+        hook=decision.get('hook_text',v.get('hook_text',''))
+        placement=decision.get('title_placement',v.get('title_placement','auto'))
+        reaction=decision.get('reaction',v.get('reaction',{'text':'','start':0.,'end':0.}))
+        effects=decision.get('effects',entry.get('config',{}).get('effects',editing.EMPTY_EFFECTS))
+        regions=decision.get('hud_regions',entry.get('config',{}).get('framing',{}).get('protected_regions',[]))
+        if not isinstance(hook,str) or len(hook)>120 or any(ord(c)<32 for c in hook):
+            raise ValueError('Hook must be one user-supplied line up to 120 characters')
+        if placement not in ('auto','top','bottom'):
+            raise ValueError('Invalid title placement')
+        editing.validate_effects(effects,end-start)
+        editing.validate_regions(regions)
+        if v:
+            visuals.validate(dict(v,hook_text=hook,title_placement=placement,reaction=reaction))
+        elif reaction!={'text':'','start':0.,'end':0.}:
+            raise ValueError('Reaction captions require a visual configuration')
         normalized = dict(rank=rank, start=start, end=end, decision=action, framing=framing,
                           visual_style=style, theme=theme, context_text=context,
-                          game_title=game_title,title_style=title_style,subtitle=subtitle)
+                          game_title=game_title,title_style=title_style,subtitle=subtitle,
+                          editing_preset=preset,hook_text=hook,title_placement=placement,reaction=reaction,
+                          effects=effects,hud_regions=regions)
         if entry.get('review') == normalized:
             continue
         if entry['status'] == 'complete':
@@ -86,13 +107,30 @@ def document(directory, manifest, metrics=None):
         chosen = dict(chosen)
         titles=title_layout.options(visual)
         for key, value in [('visual_style',visual.get('style','original')),('theme',visual.get('theme','generic')),('context_text',visual.get('context_text','')),
-                           ('game_title',visual.get('game_title','')),('title_style',titles['style']),('subtitle',titles['subtitle'])]:
+                           ('game_title',visual.get('game_title','')),('title_style',titles['style']),('subtitle',titles['subtitle']),
+                           ('editing_preset',entry.get('config',{}).get('editing_requested','auto')),
+                           ('hook_text',visual.get('hook_text','')),('title_placement',visual.get('title_placement','auto')),
+                           ('reaction',visual.get('reaction',{'text':'','start':0.,'end':0.})),
+                           ('effects',entry.get('config',{}).get('effects',editing.EMPTY_EFFECTS)),
+                           ('hud_regions',entry.get('config',{}).get('framing',{}).get('protected_regions',[]))]:
             chosen.setdefault(key,value)
         decisions.append(chosen)
         warnings = '; '.join(item.get('warnings', [])) or 'No heuristic boundary warnings; payoff remains unverified.'
         reasons = html.escape(json.dumps(item.get('reasons', {}), indent=2))
         disabled = ' disabled' if entry['status']=='complete' else ''
+        scores=item.get('reasons',{})
+        score_summary=' | '.join(f'{label}: {scores.get(key,0):.3f}' for label,key in [('Motion','motion_score'),('Audio','audio_score'),('Opening','opening_score')])
+        suggestion=item.get('suggested_editing',{'preset':'neutral','confidence':0,'reason':'Not classified'})
+        extra_controls=''.join(f'<p><label>{label}<br><textarea class="{key}" rows="3" cols="65"{disabled}>{html.escape(json.dumps(chosen[key],indent=2))}</textarea></label></p>'
+                               for key,label in [('reaction','Reaction caption: text and output start/end seconds'),('effects','Explicit effects: source-relative seconds within this clip'),('hud_regions','Protected regions: normalized source rectangles')])
         rows.append(f'''<article data-rank="{rank}"><h2>#{rank}: {html.escape(entry['status'])}</h2>
+<p>Duration: {item['end']-item['start']:.2f}s source / {entry.get('output_duration',item['end']-item['start']):.2f}s output. {html.escape(score_summary)}</p>
+<p>Suggested preset: {html.escape(suggestion['preset'])} ({suggestion['confidence']:.2f} heuristic confidence). {html.escape(suggestion['reason'])}</p>
+<p>Applied preset: {html.escape(entry.get('config',{}).get('editing_preset','neutral'))}; theme: {html.escape(visual.get('theme','generic'))}; framing: {html.escape(entry.get('framing',{}).get('mode','safe'))}.</p>
+<p>{html.escape(item.get('selection_reason',''))}</p>
+<p>{html.escape('; '.join((entry.get('qa_summary') or {}).get('warnings',[])))}</p>
+{f'<p><a href="clips/short-{rank:02d}.qa.json">Video/audio verification details</a></p>' if entry['status']=='complete' else ''}
+<details><summary>Optional external scoring evidence</summary><pre>{html.escape(json.dumps(item.get('external_score',{}),indent=2))}</pre><p>External hook suggestions are not applied automatically.</p></details>
 <p>{item['start']:.3f}–{item['end']:.3f}s · score {item['score']:.3f} · evidence confidence {item.get('confidence', 0):.2f}</p>
 <p>{html.escape(warnings)}</p><details><summary>Selection reasons</summary><pre>{reasons}</pre></details>
 <p>Planned composition</p><img src="clips/short-{rank:02d}.jpg" alt="Planned start, middle and end">
@@ -109,6 +147,10 @@ def document(directory, manifest, metrics=None):
 <p><label>Visual style <select class="visual_style"{disabled}><option>original</option><option>cinematic</option></select></label>
 <label>Theme <select class="theme"{disabled}>{theme_options}</select></label></p>
 <p><label>Title style <select class="title_style"{disabled}><option>minimal</option><option>cinematic</option><option>bold</option></select></label></p>
+<p><label>Editing preset <select class="editing_preset"{disabled}><option>auto</option><option>action</option><option>funny</option><option>cinematic</option></select></label>
+<label>Title placement <select class="title_placement"{disabled}><option>auto</option><option>top</option><option>bottom</option></select></label></p>
+<p><label>Moment hook (your words) <input class="hook_text" maxlength="120" value="{html.escape(chosen['hook_text'],quote=True)}"{disabled}></label></p>
+<details><summary>Optional timed effects and protected regions</summary>{extra_controls}</details>
 <p><label>Game title (empty uses theme title) <input class="game_title" maxlength="120" value="{html.escape(chosen['game_title'],quote=True)}"{disabled}></label></p>
 <p><label>Optional subtitle <input class="subtitle" maxlength="90" value="{html.escape(chosen['subtitle'],quote=True)}"{disabled}></label></p>
 <p><label>Optional context (your description) <input class="context_text" maxlength="90" value="{html.escape(chosen['context_text'],quote=True)}"{disabled}></label></p>
@@ -134,15 +176,15 @@ const initial=PAYLOAD, key='yta-review-'+initial.run_id;
 let saved=initial; try { const old=JSON.parse(localStorage.getItem(key)); if(old && old.run_id===initial.run_id) saved=old; } catch(e) {}
 for(const article of document.querySelectorAll('article')) {
  const item=(article.querySelector('.decision').disabled ? initial : saved).clips.find(c=>c.rank===Number(article.dataset.rank)); if(!item) continue;
- for(const field of ['decision','framing','start','end','visual_style','theme','context_text','game_title','title_style','subtitle']) {
-  const input=article.querySelector('.'+field); if(item[field]!==undefined) input.value=item[field];
+ for(const field of ['decision','framing','start','end','visual_style','theme','context_text','game_title','title_style','subtitle','editing_preset','hook_text','title_placement','reaction','effects','hud_regions']) {
+  const input=article.querySelector('.'+field); if(item[field]!==undefined) input.value=['reaction','effects','hud_regions'].includes(field)?JSON.stringify(item[field],null,2):item[field];
  }
 }
-function collect(){ return {run_id:initial.run_id, clips:[...document.querySelectorAll('article')].filter(a=>!a.querySelector('.decision').disabled).map(a=>({rank:Number(a.dataset.rank),decision:a.querySelector('.decision').value,framing:a.querySelector('.framing').value,start:Number(a.querySelector('.start').value),end:Number(a.querySelector('.end').value),visual_style:a.querySelector('.visual_style').value,theme:a.querySelector('.theme').value,context_text:a.querySelector('.context_text').value,game_title:a.querySelector('.game_title').value,title_style:a.querySelector('.title_style').value,subtitle:a.querySelector('.subtitle').value}))}; }
+function collect(){ return {run_id:initial.run_id, clips:[...document.querySelectorAll('article')].filter(a=>!a.querySelector('.decision').disabled).map(a=>({rank:Number(a.dataset.rank),decision:a.querySelector('.decision').value,framing:a.querySelector('.framing').value,start:Number(a.querySelector('.start').value),end:Number(a.querySelector('.end').value),visual_style:a.querySelector('.visual_style').value,theme:a.querySelector('.theme').value,context_text:a.querySelector('.context_text').value,game_title:a.querySelector('.game_title').value,title_style:a.querySelector('.title_style').value,subtitle:a.querySelector('.subtitle').value,editing_preset:a.querySelector('.editing_preset').value,hook_text:a.querySelector('.hook_text').value,title_placement:a.querySelector('.title_placement').value,reaction:JSON.parse(a.querySelector('.reaction').value),effects:JSON.parse(a.querySelector('.effects').value),hud_regions:JSON.parse(a.querySelector('.hud_regions').value)}))}; }
 document.addEventListener('change',()=>{try {localStorage.setItem(key,JSON.stringify(collect()));document.getElementById('status').textContent='Draft saved in this browser. Export JSON to apply it to Python.';}catch(e){document.getElementById('status').textContent='Browser storage unavailable. Export JSON to retain your decisions.';}});
 document.getElementById('export').onclick=()=>{
  if(![...document.querySelectorAll('input')].every(i=>i.checkValidity())) {alert('Check trim bounds.');return;}
- const data=collect();if(data.clips.some(c=>c.end-c.start<2)){alert('Each trim must last at least two seconds.');return;}
+ let data;try{data=collect();}catch(e){alert('Check the JSON in the optional effects/protected-region fields.');return;}if(data.clips.some(c=>c.end-c.start<2)){alert('Each trim must last at least two seconds.');return;}
  const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
  const a=document.createElement('a');a.href=url;a.download='review.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };

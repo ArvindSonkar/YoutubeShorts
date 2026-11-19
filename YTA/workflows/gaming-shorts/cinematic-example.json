@@ -56,6 +56,13 @@
       "underline": true,
       "uppercase": true
     },
-    "title_font_sha256": null
+    "title_font_sha256": null,
+    "hook_text": "",
+    "title_placement": "auto",
+    "reaction": {
+      "text": "",
+      "start": 0.0,
+      "end": 0.0
+    }
   }
 }

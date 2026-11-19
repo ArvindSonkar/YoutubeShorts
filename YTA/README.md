@@ -4,6 +4,10 @@ YTA includes a local automatic highlight pipeline and a configurable single-clip
 It uses Python, OpenCV, NumPy, Pillow, FFmpeg and FFprobe. No AI API keys, inference tokens,
 model downloads, uploads, or network requests are used by either processing command.
 
+The universal engine adds activity-aware boundaries, editing presets, manual hooks, protected
+HUD regions, explicitly timed effects and optional local candidate exchange. See
+[validation and previews](UNIVERSAL_ENGINE_VALIDATION.md) for measured results and limitations.
+
 ## One command for a recording
 
 Run in PowerShell from this repository:
@@ -22,7 +26,7 @@ Replace the input path with your recording. Input can be outside this project; g
 and artifacts must remain under `YTA/output/`. The run directory must be new on the first run.
 Backticks are PowerShell line continuations: do not put trailing spaces after them.
 
-For the GTA MP4 currently in `videos/`:
+If your recording filename contains `GTA`:
 
 ```powershell
 $gta = Get-ChildItem -LiteralPath ".\videos" -Filter "*GTA*.mp4"
@@ -37,7 +41,7 @@ Default behavior:
 1. Validate source compatibility and hash it once.
 2. Sequentially analyze 320-pixel-wide video at 3 samples/second and streamed mono audio.
 3. Score motion, camera movement, visual changes, sound energy and audio transients.
-4. Propose 20–55 second intervals (configurable down to 2 seconds), score their openings,
+4. Propose adaptive 15–40 second intervals (configurable down to 2 seconds), score their openings,
    sustained activity and boundaries, and suppress overlapping
    or visually similar selections. Apply a preference for different parts of the recording.
 5. Generate crop keyframes from stable residual-motion regions, including other substantial
@@ -145,8 +149,8 @@ Useful CLI options:
 | Option | Default | Purpose |
 |---|---:|---|
 | `--count` | 15 | Maximum number of qualifying clips |
-| `--min-duration` | 20 | Minimum selected clip length, seconds |
-| `--max-duration` | 55 | Maximum selected clip length, seconds |
+| `--min-duration` | 15 | Minimum selected source clip length, seconds |
+| `--max-duration` | 40 | Maximum selected source clip length, seconds |
 | `--min-score` | 0.30 | Candidate threshold; higher is more selective |
 | `--analysis-fps` | 3 | Visual analysis samples/second |
 | `--analysis-width` | 320 | Analysis image width, even integer |
@@ -310,7 +314,8 @@ benchmark was performed. See [UPGRADE_VALIDATION.md](UPGRADE_VALIDATION.md) for 
 New automatic runs default to a conservative cinematic panel with a neutral theme. Existing
 single-clip JSON files without `visual` keep the original renderer. To use the original
 automatic layout explicitly, pass `--visual-style original`. Original composition is tested
-for pixel equality with the previous compositor; selection and audio handling are unchanged.
+for pixel equality with the previous compositor. Original gameplay audio is retained unless
+an explicitly timed effect requests another treatment.
 
 Generate up to ten DMC5 Shorts (this full-recording command is provided, not run as part of
 the visual upgrade):
@@ -347,7 +352,7 @@ signatures intentionally cannot resume with changed code.
 | `--blur-intensity 9` | Cinematic Gaussian blur sigma, 0–30, applied at 135×240 working resolution. |
 | `--glow-intensity 0.14` | Cinematic panel glow opacity, 0–0.5. |
 
-All effects are configurable under `visual` through `--settings`. See the working example
+Presentation effects are configurable under `visual` through `--settings`. See the working example
 [`cinematic-example.json`](workflows/gaming-shorts/cinematic-example.json):
 
 ```powershell
@@ -411,6 +416,128 @@ threads. See [CINEMATIC_VALIDATION.md](CINEMATIC_VALIDATION.md) for matched befo
 preview locations and limitations. See [TITLE_UPGRADE_VALIDATION.md](TITLE_UPGRADE_VALIDATION.md)
 for the subsequent title upgrade's six-second comparison, tests and measured rendering cost.
 No commit or push is performed automatically.
+
+## Universal editing engine and GTA 6 presentation
+
+The generic detector is shared by every game. It now considers local activity contrast,
+sudden activity changes and quieter scenes with evolving visual detail. Static scenes with
+loud audio and repeated transitions are suppressed. These are ranking signals, not event,
+menu, dialogue or humor recognition. All selection reasons appear in the HTML report.
+
+Default source durations are now **15-40 seconds**. Shorter activity envelopes target at least
+15 seconds; longer envelopes and manually selected funny/cinematic presets target at least
+25 seconds. These are soft context targets within the hard min/max limits. Explicit
+`--min-duration` and `--max-duration` still win. Boundary refinement searches for nearby
+low-activity/audio edges and retains detected onset context; it cannot verify narrative payoff.
+
+Basic generic usage is unchanged:
+
+```powershell
+python -B workflows\gaming-shorts\auto_shorts.py `
+  --input "videos\GTA6.mp4" `
+  --output-dir "output\gta6-top10" `
+  --count 10 --offline
+```
+
+Add `--theme gta6` for the pink/violet presentation. The basic command intentionally remains
+neutral: filenames do not trigger game recognition. A bounded first preview could be:
+
+```powershell
+python -B workflows\gaming-shorts\auto_shorts.py `
+  --input "videos\GTA6.mp4" `
+  --output-dir "output\gta6-preview" `
+  --count 2 --theme gta6 --editing-preset auto `
+  --max-seconds 60 --analysis-only --offline
+```
+
+The GTA6 theme supplies pink title/border accents, violet background glow and a lower default
+glow intensity. Sharp gameplay colors are unchanged. It requires no GTA6 detection profile.
+Existing generic, DMC5, GTA5 and custom themes remain available.
+
+| New option | Default | Behavior |
+|---|---|---|
+| `--editing-preset auto\|action\|funny\|cinematic` | auto | Suggested presentation based on activity evidence, or manual override. |
+| `--hook-text "..."` | empty | User-provided moment hook, up to 120 characters. |
+| `--title-placement auto\|top\|bottom` | auto | Safe text band; auto prefers above gameplay. Text is omitted if it cannot safely fit. |
+| `--hud-safe-config path.json` | none | Load `{"regions": [[left, top, right, bottom]]}` in normalized source coordinates. |
+| `--highlight-diversity 0.5` | 0.5 | 0-1 preference for temporal/activity-pattern diversity among comparable scores. |
+| `--moment-aware-boundaries` / `--no-moment-aware-boundaries` | enabled | Toggle context/edge refinement. Disabling restores the legacy boundary algorithm, not legacy scoring. |
+| `--export-candidates` | off | Write local candidate metadata and up to 60 representative frames. No upload. |
+| `--rerank-file path.json` | none | Import validated optional external scores before manual review/rendering. No model execution. |
+
+`--preset` still means the FFmpeg **encoder** preset. `--title-style` still means typography.
+Explicit title/panel settings and CLI overrides take precedence over editing-preset defaults.
+
+Action uses a compact title, reduced panel margin and activity-envelope pacing. Funny uses a
+compact title, at least two seconds of setup and three seconds of tail when the duration
+limits allow; hooks and reaction captions remain user supplied. Cinematic keeps premium
+titles, softer glow and longer uninterrupted context. Auto can suggest action or cinematic;
+ambiguous clips retain neutral presentation/pacing. Funny is never inferred from motion/audio.
+No preset inserts automatic internal jump cuts, speed changes or replays. Changing a preset
+in review cannot expand the already selected interval; choose it before analysis for its
+boundary preferences.
+
+HUD protection is footage-specific. Configure rectangles for your capture's actual minimap,
+objectives and subtitles; [hud-safe-example.json](workflows/gaming-shorts/hud-safe-example.json)
+contains an illustrative rectangle, **not GTA coordinates**. Rectangles remain protected
+between keyframes and during punch-ins. Safe/close/wide modes remain available; low confidence
+falls back to wide. Automatic camera plans begin widening ahead of a future protection demand
+instead of waiting for an abrupt zoom-out. Protection can require wider framing or suppress
+a requested punch-in.
+
+Use `--analysis-only`, open the generated `index.html`, edit controls and export review JSON.
+The same review file can now include `editing_preset`, `hook_text`, `title_placement`,
+`hud_regions`, `reaction` and `effects` alongside the existing decisions, title/theme and trim
+fields. The report shows timestamps, source/output durations, component scores, preset
+suggestion/confidence, selected theme/framing, context, previews and selection reasons.
+After rendering it also links QA details and shows audio warnings. Browser changes apply
+only after JSON import; the page is not a live renderer.
+
+For a deliberately timed six-second clip, an example **per-clip review** fragment is:
+
+```json
+{
+  "rank": 1,
+  "hook_text": "Your accurate description of this moment",
+  "effects": {
+    "punch_ins": [{"start": 1, "end": 2, "strength": 0.04}],
+    "slow_motion": [{"start": 2, "end": 3, "speed": 0.5, "audio": "stretch"}],
+    "replays": [{"start": 3, "end": 4, "speed": 1, "audio": "original"}]
+  },
+  "reaction": {"text": "Replay", "start": 5, "end": 6}
+}
+```
+
+Keep the exported `run_id` and `clips` wrapper. Effect times are relative to the **selected
+source interval**; caption times are relative to the **edited output**. Replay is inserted
+immediately after its source interval. This example produces eight output seconds. It is an
+API example, not recommended timing for arbitrary clips. All effect lists default to empty.
+Each list accepts at most four non-overlapping intervals, each at most eight source seconds;
+edited outputs are capped at 180 seconds. Slow motion accepts speed 0.5-1 and requires
+`audio: "stretch"` (FFmpeg pitch-preserving tempo adjustment) or `"mute"`. Original audio is
+allowed at speed 1. Slowed frames are repeated; no optical-flow model or extra detail is invented.
+Replays can increase duration beyond the selected-source `--max-duration`.
+
+Original gameplay audio remains the default, with no automatic music, normalization or fades.
+Verification checks stream timing, decoded frame composition and audio alignment, plus
+streaming native-rate sample peaks, silence spans, boundary energy and explicit edit joins.
+Unexpected silence in checked reference windows fails QA; possible clipping/cut warnings
+remain visible for listening review. These are not true-peak mastering or speech-completion
+guarantees. A bounded set of audio windows is checked; not every sample is cross-correlated.
+
+The implementation stays CPU-based: sequential clips, two OpenCV threads, bounded decoder/
+filter concurrency, four encoder threads by default, cached features and reused preview
+frames. Video is streamed; sampled metadata grows with recording duration. No CUDA GPU,
+new Python dependencies, model downloads, tokens or internet are required. Optional effects
+add output frames and QA work. Benchmarks are in the validation report; do not extrapolate
+the short lossless fixture's timings to a 90-minute source.
+
+For future local/Colab rerankers, see the versioned
+[candidate exchange contract](workflows/gaming-shorts/CANDIDATE_EXCHANGE.md).
+Export/import is entirely local; users control any external transfer. Rule scoring remains
+the default. External hook suggestions are shown as evidence and never become captions
+without manual review. Start a fresh output directory after this code upgrade. Matching-code
+resume still caches analysis/previews and verifies completed files before skipping them.
 
 ## Existing single-clip editor
 

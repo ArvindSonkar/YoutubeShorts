@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from progress import stage, checked_output, decode_check, child_cpu_seconds, peak_memory
 import visuals
+import editing
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -111,6 +112,7 @@ def number(value, name, low, high):
 
 
 def validate(config):
+    editing.validate_effects(config.get('effects',{}))
     if 'visual' in config:
         visuals.validate(config['visual'])
     if config['schema_version'] != 1 or config['preferred_style'] != 'dynamic_crop':
@@ -130,6 +132,9 @@ def validate(config):
     if type(config['audio']['stream']) is not int or config['audio']['stream'] < 0:
         raise ValueError('audio.stream must be a nonnegative audio-stream ordinal')
     f = config['framing']
+    editing.validate_regions(f.get('protected_regions',[]))
+    if type(f.get('anticipate_widening',False)) is not bool:
+        raise ValueError('anticipate_widening must be a boolean')
     number(f['min_width'], 'framing.min_width', .01, 1)
     number(f['max_width'], 'framing.max_width', f['min_width'], 1)
     number(f['max_upscale'], 'framing.max_upscale', 1, 4)
@@ -274,12 +279,25 @@ class Job:
         self.count = self.last-self.first
         self.start, self.end = float(self.first/self.fps), float(self.last/self.fps)
         self.duration = self.end-self.start
+        self.source_count,self.source_duration=self.count,self.duration
+        editing.validate_effects(config.get('effects',{}),self.source_duration)
+        self.source_indices=range(self.source_count)
+        self.audio_segments=None
+        if config.get('effects',{}).get('slow_motion') or config.get('effects',{}).get('replays'):
+            self.source_indices,self.audio_segments=editing.timeline(config['effects'],self.source_count,float(self.fps))
+            self.count=len(self.source_indices)
+            self.duration=self.count/float(self.fps)
         self.source_hash = source_context.sha256 if source_context else digest(self.source)
         if config['expected_source_sha256'] and self.source_hash != config['expected_source_sha256'].lower():
             raise ValueError('Source checksum differs from the configured example')
         self.layer = make_hook(config, self.ow, self.oh) if config['hook']['enabled'] else None
-        self.plan = camera_plan(config, self.sw, self.sh, self.ow, self.oh, float(self.fps), self.count)
+        source_plan = camera_plan(config, self.sw, self.sh, self.ow, self.oh, float(self.fps), self.source_count)
+        self.plan=([dict(source_plan[i],frame=j,seconds=j/float(self.fps),source_frame=i,source_seconds=i/float(self.fps))
+                   for j,i in enumerate(self.source_indices)] if self.audio_segments else source_plan)
         self.presentation = visuals.Presentation(config, self.plan, ROOT) if config.get('visual', {}).get('style')=='cinematic' else None
+        reaction=config.get('visual',{}).get('reaction',{})
+        if reaction.get('text') and reaction['end']>self.duration:
+            raise ValueError('Reaction caption interval exceeds the edited output duration')
         if self.presentation and self.layer is not None:
             raise ValueError('Legacy hook overlays must be disabled for cinematic styling; use visual.context_text')
 
@@ -290,7 +308,7 @@ class Job:
             '-show_frames','-show_entries','frame=best_effort_timestamp_time','-of','json',str(self.source)], 'Source frame timestamps')
         pts = [float(f['best_effort_timestamp_time']) for f in json.loads(response)['frames'] if 'best_effort_timestamp_time' in f]
         selected = sorted(t for t in pts if self.start-.00001 <= t < self.end-.00001)
-        if len(selected) != self.count or any(abs(t-(self.first+i)/float(self.fps)) > .0001 for i,t in enumerate(selected)):
+        if len(selected) != self.source_count or any(abs(t-(self.first+i)/float(self.fps)) > .0001 for i,t in enumerate(selected)):
             raise ValueError('Source frame timestamps do not match a CFR grid; cannot guarantee audio sync')
 
 
@@ -327,6 +345,11 @@ def camera_plan(config, sw, sh, ow, oh, fps, count):
     for index in range(count):
         t=index/fps
         desired,box=target_at(config,t,key_times)
+        for protected in f.get('protected_regions',[]):
+            box=np.asarray(protected,dtype=float) if box is None else np.array([
+                min(box[0],protected[0]),min(box[1],protected[1]),max(box[2],protected[2]),max(box[3],protected[3])])
+        if f['enabled']:
+            desired[2]/=1+editing.punch(t,config.get('effects',{}))
         if f['enabled'] and imp['enabled']:
             punch=min(imp['max_strength'],sum(imp['strength']*math.exp(-((t-p)/imp['sigma_seconds'])**2) for p in imp['times']))
             desired[2]/=1+punch
@@ -352,6 +375,15 @@ def camera_plan(config, sw, sh, ow, oh, fps, count):
         previous=np.array([(x+width/2)/sw,(y+height/2)/sh,width/sw])
         result.append({'frame':index,'seconds':t,'x':x,'y':y,'width':width,'height':height,
                        'upscale':ow/width,'protected_box':box.tolist() if box is not None else None})
+    if s['enabled'] and f.get('anticipate_widening',False):
+        # Widen before a future protection/fallback demand; never delay a required safety expansion.
+        delta=s['max_width_change_per_second']*sw/fps
+        for i in range(len(result)-2,-1,-1):
+            row=result[i];width=max(row['width'],result[i+1]['width']-delta)
+            cx=row['x']+row['width']/2;cy=row['y']+row['height']/2
+            height=min(sh,width/aspect)
+            row.update(width=width,height=height,x=max(0,min(sw-width,cx-width/2)),
+                       y=max(0,min(sh-height,cy-height/2)),upscale=ow/width)
     return result
 
 
@@ -440,9 +472,10 @@ def artifacts(path, job):
 def capture(job, index, decoder=None):
     cap=decoder if decoder is not None else cv2.VideoCapture(str(job.source))
     try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES,job.first+index)
+        source_index=job.source_indices[index] if hasattr(job,'source_indices') else index
+        cap.set(cv2.CAP_PROP_POS_FRAMES,job.first+source_index)
         ok,frame=cap.read()
-        if not ok or round(cap.get(cv2.CAP_PROP_POS_FRAMES))-1 != job.first+index:
+        if not ok or round(cap.get(cv2.CAP_PROP_POS_FRAMES))-1 != job.first+source_index:
             raise ValueError(f'Source seek failed at frame {job.first+index}')
         return frame
     finally:
@@ -493,10 +526,12 @@ def render(job, label='Rendering Short'):
     if pending.exists():
         raise FileExistsError(f'Existing partial render: {pending}; choose a fresh output name')
     v,a=job.config['video'],job.config['audio']
+    audio_graph=(editing.audio_filter(job.audio_segments,a['stream']) if getattr(job,'audio_segments',None) else
+                 f'[1:a:{a["stream"]}]atrim=duration={job.duration:.12f},asetpts=PTS-STARTPTS[a]')
     command=[job.executables['ffmpeg'],'-hide_banner','-nostdin','-n',
         '-f','rawvideo','-pix_fmt','bgr24','-s',f'{job.ow}x{job.oh}','-r',str(job.fps),'-i','pipe:0',
-        '-ss',f'{job.start:.12f}','-i',str(job.source),'-filter_complex',
-        f'[1:a:{a["stream"]}]atrim=duration={job.duration:.12f},asetpts=PTS-STARTPTS[a]',
+        '-ss',f'{job.start:.12f}','-threads','2','-i',str(job.source),'-filter_complex_threads','1','-filter_complex',
+        audio_graph,
         '-map','0:v:0','-map','[a]','-c:v','libx264','-preset',v['preset'],'-crf',str(v['crf']),
         '-threads',str(v['threads']),'-vf','scale=out_color_matrix=bt709:out_range=tv,setsar=1',
         '-color_range','tv','-colorspace','bt709','-color_primaries','bt709','-color_trc','bt709',
@@ -509,10 +544,16 @@ def render(job, label='Rendering Short'):
     with stage(label, job.count, 'frames', 'Rendering') as meter, (directory/'render.log').open('x',encoding='utf-8') as log:
         process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,cwd=ROOT)
         try:
+            last_index=-1;frame=None
             for index in range(job.count):
-                ok,frame=cap.read()
-                if not ok or round(cap.get(cv2.CAP_PROP_POS_FRAMES))-1 != job.first+index:
-                    raise ValueError('Decoder frame position changed unexpectedly')
+                source_index=job.source_indices[index] if hasattr(job,'source_indices') else index
+                if source_index!=last_index:
+                    if source_index!=last_index+1:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES,job.first+source_index)
+                    ok,frame=cap.read()
+                    if not ok or round(cap.get(cv2.CAP_PROP_POS_FRAMES))-1 != job.first+source_index:
+                        raise ValueError('Decoder frame position changed unexpectedly')
+                    last_index=source_index
                 process.stdin.write(compose(frame,job.plan[index],job.config,job.layer,getattr(job,'presentation',None)).tobytes())
                 meter.update(index+1)
             process.stdin.close()
@@ -555,7 +596,8 @@ def render(job, label='Rendering Short'):
         'source_end_frame_exclusive':job.last,'frame_count':job.count,'fps':str(job.fps),
         'video':'h264','audio':'aac','channels':aus['channels'],
         'maximum_upscale':max(p['upscale'] for p in job.plan),
-        'note':'Original audio retained and AAC re-encoded; no normalization, music, or sound effects.'})
+        'audio_segments':getattr(job,'audio_segments',None),
+        'note':'Original gameplay audio with explicitly configured timeline treatments only; no added music.'})
     # Windows rename refuses existing destinations; never replace a completed file.
     if job.target.exists():
         raise FileExistsError('Output was created by another process; partial retained')

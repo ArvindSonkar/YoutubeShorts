@@ -285,7 +285,8 @@ class ResumeTests(unittest.TestCase):
 
     def test_pipeline_has_no_network_or_model_dependencies(self):
         forbidden = {'requests','urllib','http','socket','torch','transformers','openai'}
-        for name in ('auto_shorts.py','analyze.py','autoframe.py','dynamic_crop.py','verify_output.py','progress.py','game_profiles.py'):
+        for name in ('auto_shorts.py','analyze.py','autoframe.py','dynamic_crop.py','verify_output.py','progress.py','game_profiles.py',
+                     'moments.py','editing.py','candidate_exchange.py','audio_quality.py'):
             tree = ast.parse((HERE/name).read_text(encoding='utf-8'))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

@@ -13,13 +13,29 @@ THEMES = {
     'generic': {'accent': [170, 183, 201], 'title': ''},
     'dmc5': {'accent': [180, 135, 255], 'title': 'DEVIL MAY CRY 5'},
     'gta5': {'accent': [125, 205, 151], 'title': 'GRAND THEFT AUTO V'},
-    'gta6': {'accent': [239, 148, 204], 'title': 'GRAND THEFT AUTO VI'},
+    'gta6': {'accent': [239, 148, 204], 'glow_accent': [178, 145, 236], 'title': 'GRAND THEFT AUTO VI'},
     'custom': {'accent': [170, 183, 201], 'title': ''},
 }
 
 
 def validate(v):
     title_layout.validate(v)
+    if v.get('title_placement','auto') not in ('auto','top','bottom'):
+        raise ValueError('title_placement must be auto, top or bottom')
+    hook=v.get('hook_text','')
+    if not isinstance(hook,str) or len(hook)>120 or any(ord(c)<32 for c in hook):
+        raise ValueError('hook_text must be one user-supplied line up to 120 characters')
+    reaction=v.get('reaction',{'text':'','start':0,'end':0})
+    if not isinstance(reaction,dict) or set(reaction)!={'text','start','end'}:
+        raise ValueError('reaction requires text, start and end')
+    if not isinstance(reaction['text'],str) or len(reaction['text'])>90 or any(ord(c)<32 for c in reaction['text']):
+        raise ValueError('reaction text must be one line up to 90 characters')
+    for k in ('start','end'):
+        value=reaction[k]
+        if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not 0<=value<=180:
+            raise ValueError('Reaction times must be finite output seconds in [0,180]')
+    if reaction['text'] and reaction['end']<=reaction['start']:
+        raise ValueError('Reaction captions require an explicit positive interval')
     if v['style'] not in ('original', 'cinematic') or v['theme'] not in THEMES:
         raise ValueError('Unknown visual style/theme')
     def number(value, key, low, high):
@@ -78,9 +94,9 @@ def asset_hashes(v, root):
     result = {'font_sha256': None, 'logo_sha256': None, 'title_font_sha256': None}
     if v['style'] != 'cinematic':
         return result
-    text = title(v) or v['context_text'] or (v['branding']['enabled'] and v['branding']['name'])
+    text = title(v) or v.get('hook_text') or v.get('reaction',{}).get('text') or v['context_text'] or (v['branding']['enabled'] and v['branding']['name'])
     for key, path in [('font', v['font'] if text else ''),
-                      ('title_font', title_layout.options(v)['font'] if title(v) else ''),
+                      ('title_font', title_layout.options(v)['font'] if title(v) or v.get('hook_text') or v.get('reaction',{}).get('text') else ''),
                       ('logo', v['branding']['logo'] if v['branding']['enabled'] else '')]:
         if path:
             local = asset_path(path, root)
@@ -153,6 +169,7 @@ class Presentation:
         self.ow, self.oh = config['video']['width'], config['video']['height']
         self.scale = self.ow/1080
         self.accent = tuple(int(c) for c in (self.v['accent'] or THEMES[self.v['theme']]['accent']))
+        self.glow_accent=tuple(self.v['accent'] or THEMES[self.v['theme']].get('glow_accent',self.accent))
         actual = asset_hashes(self.v, root)
         for key,value in actual.items():
             if self.v.get(key) is not None and self.v[key] != value:
@@ -174,29 +191,44 @@ class Presentation:
         sx,sy,sr,sb = self.safe
         width = sr-sx
         if not self.compact:
+            placement=self.v.get('title_placement','auto')
+            band_end=self.top-gap
+            if placement=='bottom' or (placement=='auto' and self.top-gap-sy<100*self.scale and sb-self.bottom-gap>self.top-gap-sy):
+                sy=max(sy,self.bottom+gap);band_end=sb
             pieces = []
             center=self.ow/2
             title_width=max(1,math.floor(2*min(center-sx,sr-center)))
             context = self.text_image(self.v['context_text'],32,title_width,wrap=True) if self.v['context_text'] else None
-            title_height=max(0,self.top-gap-sy-(context.height+gap if context else 0))
+            hook=self.caption_image(self.v.get('hook_text',''),title_width,max(0,band_end-sy))
+            reserve=(hook.height+gap if hook else 0)
+            title_height=max(0,band_end-sy-reserve-(context.height+gap if context else 0))
             if title(self.v):
                 title_image,self.title_metadata=title_layout.build(title(self.v),self.v,title_width,title_height,
                     self.scale,self.title_font_path,self.accent)
                 if title_image is None and context:
                     context=None
-                    title_image,self.title_metadata=title_layout.build(title(self.v),self.v,title_width,max(0,self.top-gap-sy),
+                    title_image,self.title_metadata=title_layout.build(title(self.v),self.v,title_width,max(0,band_end-sy-reserve),
                         self.scale,self.title_font_path,self.accent)
                 pieces.append(('title',title_image))
+            if hook:
+                pieces.append(('hook',hook))
             if self.v['context_text']:
                 pieces.append(('context',context))
             pieces = [(kind,img) for kind,img in pieces if img is not None]
-            while pieces and sum(img.height for _,img in pieces)+gap*max(0,len(pieces)-1) > self.top-gap-sy:
+            while pieces and sum(img.height for _,img in pieces)+gap*max(0,len(pieces)-1) > band_end-sy:
                 pieces.pop()  # Omit optional context first; never overlap gameplay.
             height = sum(img.height for _,img in pieces)+gap*max(0,len(pieces)-1)
-            y = sy+max(0, round((self.top-gap-sy-height)*.62))
+            y = sy+max(0, round((band_end-sy-height)*.62))
             for kind,img in pieces:
                 self.add(kind,img,(self.ow-img.width)//2,y,1.)
                 y += img.height+gap
+            reaction=self.v.get('reaction',{})
+            if reaction.get('text'):
+                image=self.caption_image(reaction['text'],title_width,max(0,sb-self.bottom-gap))
+                if image:
+                    self.add('reaction',image,(self.ow-image.width)//2,self.bottom+gap,1.)
+                    if self.overlays and self.overlays[-1]['kind']=='reaction':
+                        self.overlays[-1]['visible_between']=[reaction['start'],reaction['end']]
             branding = self.v['branding']
             if branding['enabled'] and (branding['name'] or branding['logo']):
                 brand = self.brand_image(branding,root,width)
@@ -210,6 +242,13 @@ class Presentation:
                 if fits(rect,self.safe,[[0,self.top,self.ow,self.bottom-self.top]]+[o['rect'] for o in self.overlays]):
                     self.line=rect
         self.gradient = (1-self.v['background']['gradient']*np.abs(np.linspace(-1,1,240))**1.5).astype(np.float32)[:,None,None]
+
+    def caption_image(self,text,width,height):
+        if not text:
+            return None
+        v=dict(self.v,title=dict(title_layout.options(self.v),style='cinematic',font_size=48,
+            min_font_size=28,max_lines=2,subtitle='',underline=False,uppercase=False,letter_spacing=.5))
+        return title_layout.build(text,v,width,height,self.scale,self.title_font_path,self.accent)[0]
 
     def text_image(self, text, size, width, badge=False, wrap=False):
         size = max(12,round(size*self.scale))
@@ -273,7 +312,10 @@ class Presentation:
     def report(self):
         return dict(style='cinematic', theme=self.v['theme'], compact=self.compact, safe_rectangle=self.safe,
                     title=self.title_metadata,
-                    overlays=[{'kind':o['kind'],'rect':o['rect']} for o in self.overlays], progress_line=self.line,
+                    overlays=[{'kind':o['kind'],'rect':o['rect'],'visible_between':o.get('visible_between')} for o in self.overlays], progress_line=self.line,
+                    title_placement=self.v.get('title_placement','auto'),hook_text=self.v.get('hook_text',''),
+                    omitted_text=[kind for kind,text in [('hook',self.v.get('hook_text','')),('reaction',self.v.get('reaction',{}).get('text',''))]
+                                  if text and not any(o['kind']==kind for o in self.overlays)],
                     common_gameplay_band=[0,self.top,self.ow,self.bottom-self.top], asset_hashes=self.assets,
                     note='Safe margins are configurable estimates; platform UI varies. All decorative text is outside gameplay.')
 
@@ -296,7 +338,7 @@ class Presentation:
             glow,shadow=decoration_masks(tuple(layout['outer']),layout['radius'],self.ow,self.oh)
             values*=1-shadow[:,:,None]*self.v['panel']['shadow']
             alpha=glow[:,:,None]*self.v['panel']['glow']
-            values=values*(1-alpha)+np.asarray(self.accent[::-1],np.float32)*alpha
+            values=values*(1-alpha)+np.asarray(self.glow_accent[::-1],np.float32)*alpha
         return cv2.resize(np.clip(values,0,255).astype(np.uint8),(self.ow,self.oh),interpolation=cv2.INTER_LINEAR)
 
     def compose(self, frame, geometry):
@@ -317,6 +359,8 @@ class Presentation:
         fade=min(1.,max(0.,geometry['seconds']/self.v['fade_in'])) if self.v['fade_in'] else 1.
         fade=fade*fade*(3-2*fade)
         for overlay in self.overlays:
+            if 'visible_between' in overlay and not overlay['visible_between'][0]<=geometry['seconds']<overlay['visible_between'][1]:
+                continue
             ox,oy,ow,oh=overlay['rect']
             roi=canvas[oy:oy+oh,ox:ox+ow]
             alpha=overlay['alpha']*fade

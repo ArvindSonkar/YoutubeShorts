@@ -26,7 +26,9 @@
     "max_width": 1.0,
     "max_upscale": 2.6,
     "subject_padding": 0.02,
-    "keyframes": []
+    "keyframes": [],
+    "protected_regions": [],
+    "anticipate_widening": false
   },
   "smoothing": {
     "enabled": true,
@@ -108,7 +110,14 @@
       "underline": true,
       "uppercase": true
     },
-    "title_font_sha256": null
+    "title_font_sha256": null,
+    "hook_text": "",
+    "title_placement": "auto",
+    "reaction": {
+      "text": "",
+      "start": 0.0,
+      "end": 0.0
+    }
   },
   "hook": {
     "enabled": false,
@@ -147,5 +156,12 @@
       252
     ],
     "panel_opacity": 190
-  }
+  },
+  "effects": {
+    "punch_ins": [],
+    "slow_motion": [],
+    "replays": []
+  },
+  "editing_preset": "neutral",
+  "editing_requested": "auto"
 }

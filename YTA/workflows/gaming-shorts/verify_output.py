@@ -7,6 +7,8 @@ import numpy as np
 
 from dynamic_crop import compose, probe
 from progress import stage, decode_check
+import audio_quality
+import editing
 
 
 def audio_samples(job, path, start, duration, ordinal=0):
@@ -14,6 +16,17 @@ def audio_samples(job, path, start, duration, ordinal=0):
                '-i', str(path), '-t', f'{duration:.12f}', '-map', f'0:a:{ordinal}',
                '-ac', '1', '-ar', '8000', '-f', 'f32le', 'pipe:1']
     return np.frombuffer(subprocess.check_output(command, stderr=subprocess.PIPE), '<f4')
+
+
+def expected_audio(job,offset,duration):
+    if not getattr(job,'audio_segments',None):
+        return audio_samples(job,job.source,job.start+offset,duration,job.config['audio']['stream'])
+    graph=editing.audio_filter(job.audio_segments,job.config['audio']['stream'],input_index=0)
+    graph+=f';[a]atrim=start={offset:.12f}:end={offset+duration:.12f},asetpts=PTS-STARTPTS[check]'
+    command=[job.executables['ffmpeg'],'-v','error','-nostdin','-threads','2','-ss',f'{job.start:.12f}',
+        '-i',str(job.source),'-filter_complex_threads','1','-filter_complex',graph,'-map','[check]',
+        '-ac','1','-ar','8000','-f','f32le','pipe:1']
+    return np.frombuffer(subprocess.check_output(command,stderr=subprocess.PIPE),'<f4')
 
 
 def verify(job, full_decode=True):
@@ -33,6 +46,9 @@ def _verify(job, full_decode, meter):
         raise RuntimeError('Output audio stream does not match the job')
     if abs(float(meta['format']['duration'])-job.duration) > max(.06, 1/float(job.fps)):
         raise RuntimeError('Output duration does not match the job')
+    for stream in (video,sound):
+        if abs(float(stream.get('start_time',0)))>.08 or abs(float(stream.get('duration',job.duration))-job.duration)>.10:
+            raise RuntimeError('Audio/video stream timing differs from the expected timeline')
     if full_decode:
         decode_check(job.executables['ffmpeg'], job.target, job.duration)
     meter.update(1)
@@ -41,7 +57,8 @@ def _verify(job, full_decode, meter):
     errors = []
     try:
         for index in sorted(set([0, job.count//2, job.count-1])):
-            source.set(cv2.CAP_PROP_POS_FRAMES, job.first+index)
+            source_index=job.source_indices[index] if hasattr(job,'source_indices') else index
+            source.set(cv2.CAP_PROP_POS_FRAMES, job.first+source_index)
             output.set(cv2.CAP_PROP_POS_FRAMES, index)
             ok1, original = source.read(); ok2, encoded = output.read()
             if not ok1 or not ok2:
@@ -55,10 +72,18 @@ def _verify(job, full_decode, meter):
     finally:
         source.release(); output.release()
     audio_checks = []
+    diagnostics=audio_quality.inspect(job) if hasattr(job,'source_indices') else None
+    offsets={0.,max(0.,job.duration-2.)}
+    if diagnostics:
+        offsets.add(max(0.,job.duration/2-1))
+        offsets.update(a for a,b in diagnostics['silence_intervals'][:8])
+    for segment in getattr(job,'audio_segments',None) or []:
+        offsets.add(max(0.,segment['output_start']-.1))
+    meter.total=4+len(offsets)
     # Bounded windows near both ends catch a trim offset and accumulated drift.
-    for offset in sorted(set([0., max(0., job.duration-2.)])):
+    for offset in sorted(offsets):
         duration = min(2., job.duration-offset)
-        original = audio_samples(job, job.source, job.start+offset, duration, job.config['audio']['stream'])
+        original = expected_audio(job,offset,duration)
         encoded = audio_samples(job, job.target, offset, duration)
         size = min(len(original), len(encoded))
         if size < 1 or abs(len(original)-len(encoded)) > 512:
@@ -67,6 +92,8 @@ def _verify(job, full_decode, meter):
         rms = float(np.sqrt(np.mean(original**2)))
         encoded_rms = float(np.sqrt(np.mean(encoded**2)))
         correlation = None
+        if rms>.001 and encoded_rms<rms*.05:
+            raise RuntimeError(f'Unexpected output silence at +{offset:.3f}s')
         if rms > .0001 and np.std(original) > .0001:
             correlation = float(np.corrcoef(original, encoded)[0, 1])
             if not np.isfinite(correlation) or correlation < .85:
@@ -80,4 +107,5 @@ def _verify(job, full_decode, meter):
     return {'frames': job.count, 'dimensions': [job.ow, job.oh], 'duration': job.duration,
             'visual_layout': job.presentation.report() if getattr(job,'presentation',None) else {'style':'original'},
             'fps': str(job.fps), 'frame_checks': errors, 'audio_checks': audio_checks,
+            'audio_quality':diagnostics,'audio_segments':getattr(job,'audio_segments',None),
             'full_decode_passed': True, 'note': 'Technical checks do not measure entertainment value.'}
